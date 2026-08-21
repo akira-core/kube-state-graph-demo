@@ -1,0 +1,30 @@
+{{- range $w := .Values.workloads }}
+{{- if $w.service }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $w.name }}
+  namespace: {{ $w.namespace }}
+  labels:
+    {{- include "demo-workloads.labels" $ | nindent 4 }}
+    {{- include "demo-workloads.podLabels" $w | nindent 4 }}
+  annotations:
+    # Read by kube_service_annotations once kube-state-metrics is started with
+    # --metric-annotations-allowlist=services=[argocd.argoproj.io/tracking-id].
+    # Absent that flag the annotation is simply invisible to the graph.
+    argocd.argoproj.io/tracking-id: {{ include "demo-workloads.trackingID" (dict "app" $w.application "kind" "Service" "ns" $w.namespace "name" $w.name) | quote }}
+spec:
+  {{- if $w.headless }}
+  # Headless on purpose: the graph reports cluster_ip "None" as no ipaddress at
+  # all, which must stay distinguishable from an unknown one.
+  clusterIP: None
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ $w.name }}
+  ports:
+    - name: http
+      port: {{ default $.Values.defaults.port $w.port }}
+      targetPort: http
+---
+{{- end }}
+{{- end }}

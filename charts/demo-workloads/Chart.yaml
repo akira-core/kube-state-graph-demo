@@ -1,0 +1,6 @@
+apiVersion: v2
+name: demo-workloads
+description: The synthetic Kubernetes estate the graph renders — namespaces, workloads, services and claims.
+type: application
+version: 0.1.0
+appVersion: demo

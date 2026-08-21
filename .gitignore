@@ -1,0 +1,10 @@
+# Helm pulls the pinned upstream charts here; they are reproducible from
+# Chart.lock and would otherwise be vendored into every commit.
+charts/ksg-demo/charts/
+
+# Local build scratch.
+*.tgz
+.DS_Store
+
+# Playwright MCP scratch.
+.playwright-mcp/

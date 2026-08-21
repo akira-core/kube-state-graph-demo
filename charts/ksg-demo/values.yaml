@@ -1,0 +1,395 @@
+# ksg-demo — one release, whole demo.
+#
+# Service names are pinned with fullnameOverride throughout rather than derived
+# from the release name. Half of these components address each other by URL in
+# free-form config (the collector's remote-write endpoint, the backend's
+# --prom-url, the faker's two endpoints), and a URL cannot be templated from
+# inside a subchart's values. Fixed names keep every one of those honest.
+
+# ---------------------------------------------------------------------------
+# VictoriaMetrics — the single store everything writes to and the backend reads.
+# ---------------------------------------------------------------------------
+victoria-metrics-cluster:
+  fullnameOverride: vm
+
+  vmselect:
+    replicaCount: 1
+    service:
+      # Exposed on a kind extraPortMapping so the demo can be cross-checked
+      # with raw PromQL when the graph disagrees with expectations.
+      type: NodePort
+      nodePort: 30481
+  vminsert:
+    replicaCount: 1
+  vmstorage:
+    replicaCount: 1
+    # Two days is plenty for a demo and keeps the laptop's disk out of it.
+    retentionPeriod: 2d
+    persistentVolume:
+      # emptyDir: a restart losing the demo's metrics costs one scrape interval.
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# kube-state-metrics — the topology half of the graph.
+#
+# The collector list and the two allowlists below are lifted from the backend's
+# own docs/kube-state-metrics-preconditions.md. Trimming `collectors` is what
+# trims the generated ClusterRole, so this list is also the RBAC.
+# ---------------------------------------------------------------------------
+kube-state-metrics:
+  fullnameOverride: ksm
+
+  collectors:
+    - endpointslices
+    - nodes
+    - persistentvolumeclaims
+    - pods
+    - replicasets
+    - services
+
+  # Exactly the 15 series the graph reads, and nothing else.
+  metricAllowlist:
+    - kube_pod_info
+    - kube_pod_owner
+    - kube_pod_container_info
+    - kube_pod_spec_volumes_persistentvolumeclaims_info
+    - kube_node_info
+    - kube_node_labels
+    - kube_node_status_addresses
+    - kube_node_status_condition
+    - kube_service_info
+    - kube_service_annotations
+    - kube_persistentvolumeclaim_info
+    - kube_persistentvolumeclaim_annotations
+    - kube_replicaset_owner
+    - kube_endpointslice_endpoints
+    - kube_endpointslice_labels
+    # Not read by the graph. netapp-faker uses it to size the volume stats it
+    # stands in for, so a claim's reported capacity matches what it asked for.
+    - kube_persistentvolumeclaim_resource_requests_storage_bytes
+
+  # NOT a kube-state-metrics default, and REQUIRED: without it
+  # kube_endpointslice_labels carries no label_kubernetes_io_service_name, the
+  # EndpointSlice cannot be joined to its Service, and every service-selects-pod
+  # edge disappears.
+  #
+  # (The chart really does spell its two allowlists inconsistently —
+  # `metricLabelsAllowlist` vs `metricAnnotationsAllowList`. Not a typo here.)
+  metricLabelsAllowlist:
+    - endpointslices=[kubernetes.io/service-name]
+    - nodes=[topology.kubernetes.io/zone,topology.kubernetes.io/region]
+
+  # Gives Services and PVCs their `application`, which is what nests them under
+  # an application group in the panel.
+  metricAnnotationsAllowList:
+    - services=[argocd.argoproj.io/tracking-id]
+    - persistentvolumeclaims=[argocd.argoproj.io/tracking-id]
+
+  rbac:
+    create: true
+  autosharding:
+    enabled: false
+  prometheus:
+    monitor:
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry Collector — the piece that makes the other pieces joinable.
+#
+# Three jobs, none of which any other component can do:
+#   1. scrape kube-state-metrics and the kubelets into VictoriaMetrics;
+#   2. turn the demo's traces into traces_service_graph_* metrics carrying
+#      client_k8s_pod_uid / server_k8s_pod_uid;
+#   3. stamp cluster / az / env, which kube-state-metrics cannot emit at all.
+# ---------------------------------------------------------------------------
+opentelemetry-collector:
+  fullnameOverride: otel-collector
+  mode: deployment
+  replicaCount: 1
+
+  # contrib, not core: the servicegraph connector, the prometheus receiver and
+  # the prometheusremotewrite exporter all live there.
+  image:
+    repository: otel/opentelemetry-collector-contrib
+  command:
+    name: otelcol-contrib
+
+  # kubernetes_sd_configs role:node plus the API-server metrics proxy.
+  clusterRole:
+    create: true
+    rules:
+      - apiGroups: ['']
+        resources:
+          - nodes
+          - nodes/proxy
+          - nodes/metrics
+        verbs: ['get', 'list', 'watch']
+
+  # Trace intake is OTLP only; the demo has no Jaeger or Zipkin producers.
+  ports:
+    jaeger-compact:
+      enabled: false
+    jaeger-thrift:
+      enabled: false
+    jaeger-grpc:
+      enabled: false
+    zipkin:
+      enabled: false
+
+  resources:
+    limits:
+      memory: 512Mi
+
+  config:
+    receivers:
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: kube-state-metrics
+              scrape_interval: 15s
+              static_configs:
+                - targets: ['ksm:8080']
+
+            # kubelet, reached through the API server's node proxy rather than
+            # port 10250 directly: the proxy needs only the ServiceAccount
+            # token, where a direct scrape would need the kubelet's serving CA.
+            - job_name: kubelet
+              scrape_interval: 30s
+              scheme: https
+              tls_config:
+                ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              authorization:
+                type: Bearer
+                credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+              kubernetes_sd_configs:
+                - role: node
+              relabel_configs:
+                - target_label: __address__
+                  replacement: kubernetes.default.svc:443
+                # $$1 survives the collector's own ${} expansion and reaches
+                # Prometheus relabelling as $1.
+                - source_labels: [__meta_kubernetes_node_name]
+                  regex: (.+)
+                  target_label: __metrics_path__
+                  replacement: /api/v1/nodes/$$1/proxy/metrics
+              metric_relabel_configs:
+                # The kubelet exposes hundreds of series; the graph reads two.
+                - source_labels: [__name__]
+                  regex: kubelet_volume_stats_(used|capacity)_bytes
+                  action: keep
+
+    connectors:
+      # Pairs each CLIENT span with the SERVER span it caused and emits the
+      # RED triplet the backend joins by exact series identity.
+      service_graph:
+        latency_histogram_buckets: [2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s]
+        # Becomes client_k8s_pod_uid / server_k8s_pod_uid — the ONLY thing that
+        # resolves a call edge to a pod instead of an `external` node.
+        dimensions:
+          - k8s.pod.uid
+        # A client span that never finds its server span becomes a VIRTUAL node
+        # labelled with the first of these attributes it carries. Only
+        # peer.service is listed, and only the deliberate connection-string
+        # spans set it — adding an attribute the HTTP instrumentation also sets
+        # (server.address, for one) would make every genuinely lost span pair
+        # masquerade as a resolvable peer.
+        virtual_node_peer_attributes:
+          - peer.service
+        store:
+          ttl: 10s
+          max_items: 20000
+        metrics_flush_interval: 15s
+
+    processors:
+      # The pod UID arrives as a RESOURCE attribute (downward API). Copying it
+      # onto the span makes the connector's dimension lookup independent of
+      # whether that particular build also searches resource attributes.
+      transform/pod-uid:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["k8s.pod.uid"], resource.attributes["k8s.pod.uid"])
+
+      # With suffixes off the latency histogram arrives as
+      # traces_service_graph_request_server (unit seconds, stripped). The
+      # backend queries traces_service_graph_request_server_seconds_bucket by
+      # name, so put the unit back before export — without this every edge
+      # silently loses p90ServerMs.
+      transform/servicegraph-names:
+        error_mode: ignore
+        metric_statements:
+          - context: metric
+            statements:
+              - set(name, "traces_service_graph_request_server_seconds") where name == "traces_service_graph_request_server"
+              - set(name, "traces_service_graph_request_client_seconds") where name == "traces_service_graph_request_client"
+
+      # The three labels kube-state-metrics cannot produce. Every graph id is
+      # cluster-scoped, and ?az= / ?env= are pushed to upstream PromQL as raw
+      # matchers against every topology family — so these must reach ALL of
+      # them, kubelet and service-graph series included.
+      transform/external-labels:
+        error_mode: ignore
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(attributes["cluster"], "ksg-demo")
+              - set(attributes["az"], "local-a")
+              - set(attributes["env"], "demo")
+
+    exporters:
+      prometheus_remote_write:
+        endpoint: http://vm-vminsert:8480/insert/0/prometheus/api/v1/write
+        tls:
+          insecure: true
+        # Suffixes OFF. The connector already names its counter
+        # traces_service_graph_request_total; letting the exporter append its
+        # own _total would produce ..._total_total and the backend's query
+        # would match nothing. The cost is that the latency histogram also
+        # loses its unit suffix, which transform/servicegraph-names restores.
+        translation_strategy: UnderscoreEscapingWithoutSuffixes
+        target_info:
+          enabled: false
+        resource_to_telemetry_conversion:
+          enabled: false
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, transform/pod-uid, batch]
+          exporters: [service_graph]
+        metrics:
+          receivers: [prometheus, service_graph]
+          processors: [memory_limiter, transform/servicegraph-names, transform/external-labels, batch]
+          exporters: [prometheus_remote_write]
+
+# ---------------------------------------------------------------------------
+# kube-state-graph — the API the panel calls.
+# ---------------------------------------------------------------------------
+kube-state-graph:
+  fullnameOverride: kube-state-graph
+  # Tenant-scoped read path. The cluster build serves the Prometheus API under
+  # /select/<accountID>/prometheus, and the backend appends /api/v1/... to
+  # whatever base it is given.
+  promURL: http://vm-vmselect:8481/select/0/prometheus
+  azLabel: az
+  envLabel: env
+  service:
+    type: NodePort
+    nodePort: 30080
+
+# ---------------------------------------------------------------------------
+# netapp-faker — the one component that is not real.
+# ---------------------------------------------------------------------------
+netapp-faker:
+  vmSelectURL: http://vm-vmselect:8481/select/0/prometheus
+  vmInsertURL: http://vm-vminsert:8480/insert/0/prometheus
+  storageClass: netapp-nas
+  # ON here, unlike the chart default. kind's local-path PersistentVolumes are
+  # hostPath-backed, and the kubelet exposes no kubelet_volume_stats_* for those
+  # at all (its /stats/summary reports an empty volume list) — so there is no
+  # real series for this to collide with, and without it no claim in the demo
+  # would show a usage fill.
+  emitVolumeStats: true
+  extraLabels:
+    az: local-a
+    env: demo
+
+# ---------------------------------------------------------------------------
+# The estate being drawn.
+# ---------------------------------------------------------------------------
+demo-workloads:
+  otlpEndpoint: http://otel-collector.monitoring.svc.cluster.local:4317
+  storageClass:
+    create: true
+    name: netapp-nas
+
+# ---------------------------------------------------------------------------
+# Grafana — anonymous Admin, because this is a laptop demo with no secrets in it.
+# ---------------------------------------------------------------------------
+grafana:
+  fullnameOverride: grafana
+
+  service:
+    type: NodePort
+    nodePort: 30300
+
+  # The Infinity datasource is the transport: the panel reads the backend's
+  # JSON through it rather than through a Grafana query language.
+  plugins:
+    - yesoreyeram-infinity-datasource
+
+  env:
+    # The panel is built from source here and is therefore unsigned. The value
+    # is the plugin id, which must equal the directory the init container below
+    # writes to.
+    GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: marz32one-ksg-panel
+
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Admin
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+    news:
+      news_feed_enabled: false
+
+  # Grafana loads panel plugins from disk, so the plugin image is a file
+  # carrier: copy it into the shared `storage` volume before Grafana starts.
+  extraInitContainers:
+    - name: install-ksg-panel
+      image: ksg-demo/panel:local
+      imagePullPolicy: Never
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          dest=/var/lib/grafana/plugins/marz32one-ksg-panel
+          mkdir -p /var/lib/grafana/plugins
+          rm -rf "$dest"
+          cp -r /plugin "$dest"
+          echo "installed kube-state-graph panel:"
+          ls -l "$dest"
+      volumeMounts:
+        - name: storage
+          mountPath: /var/lib/grafana
+
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: kube-state-graph
+          type: yesoreyeram-infinity-datasource
+          uid: ksg-default
+          url: http://kube-state-graph:8080
+          access: proxy
+          isDefault: false
+          jsonData:
+            timeout: 30
+        # Not needed by the panel — there so the demo can be inspected with
+        # plain PromQL when a graph looks wrong.
+        - name: VictoriaMetrics
+          type: prometheus
+          uid: victoriametrics
+          url: http://vm-vmselect:8481/select/0/prometheus
+          access: proxy
+          isDefault: true
+
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: ksg
+          orgId: 1
+          folder: 'kube-state-graph'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/ksg
+
+  dashboardsConfigMaps:
+    ksg: ksg-dashboards

@@ -1,0 +1,21 @@
+{{- range $w := .Values.workloads }}
+{{- if $w.pvc }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $w.name }}-data
+  namespace: {{ $w.namespace }}
+  labels:
+    {{- include "demo-workloads.labels" $ | nindent 4 }}
+    {{- include "demo-workloads.podLabels" $w | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/tracking-id: {{ include "demo-workloads.trackingID" (dict "app" $w.application "kind" "PersistentVolumeClaim" "ns" $w.namespace "name" (printf "%s-data" $w.name)) | quote }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ $w.pvc.className }}
+  resources:
+    requests:
+      storage: {{ $w.pvc.size }}
+---
+{{- end }}
+{{- end }}

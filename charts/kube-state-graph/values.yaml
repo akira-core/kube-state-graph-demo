@@ -1,0 +1,49 @@
+# kube-state-graph reads its whole world from a Prometheus-compatible store.
+# It never talks to the Kubernetes API, so it needs no RBAC and no kubeconfig —
+# only the URL below.
+image:
+  repository: ksg-demo/kube-state-graph
+  tag: local
+  # Never: the image is side-loaded into kind with `kind load docker-image` and
+  # exists in no registry. IfNotPresent would still work, but Never turns a
+  # missing side-load into an immediate, legible failure.
+  pullPolicy: Never
+
+replicaCount: 1
+
+# Resource names default to <release>-kube-state-graph. The umbrella chart pins
+# fullnameOverride instead, because Grafana's datasource addresses this service
+# by URL and a URL cannot be templated from a subchart's values.
+nameOverride: ''
+fullnameOverride: ''
+
+# REQUIRED. Point at vmselect's Prometheus API base, including the tenant path
+# (VictoriaMetrics cluster serves reads under /select/<accountID>/prometheus).
+promURL: ''
+
+listenAddr: ':8080'
+logLevel: info
+
+# The label keys the ?az= / ?env= request filters are matched against. They must
+# name labels the collector actually stamps on every topology family.
+azLabel: az
+envLabel: env
+
+service:
+  type: ClusterIP
+  port: 8080
+  # Set to expose the API on a kind extraPortMapping.
+  nodePort: null
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+extraEnv: []
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

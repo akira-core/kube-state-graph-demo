@@ -1,0 +1,43 @@
+# The one deliberately fake component in the demo. A laptop cannot run an ONTAP
+# array, so this stands in for NetApp Harvest and emits the same series
+# kube-state-graph reads — against the PV names the real kind cluster assigned.
+image:
+  repository: ksg-demo/tools
+  tag: local
+  pullPolicy: Never
+
+replicaCount: 1
+
+# REQUIRED. Reads (discovery) go to vmselect, writes (import) to vminsert.
+vmSelectURL: ''
+vmInsertURL: ''
+
+# Only claims on this StorageClass get a fake NetApp backend. Everything else
+# keeps a bare PVC node, which is the point: the demo shows both the joined and
+# the unjoined case side by side.
+storageClass: netapp-nas
+
+ontapCluster: ontap-lab
+ontapSVM: svm_demo
+
+interval: 15s
+lookback: 10m
+
+# kubelet reports real volume stats for the demo claims, so leave this off.
+# Turn it on only where the backing volume plugin reports nothing — two sources
+# for the same series would leave the builder picking one at random.
+emitVolumeStats: false
+
+# Stamped onto every emitted series. kube-state-graph pushes ?az= / ?env= to
+# upstream PromQL as raw matchers against EVERY topology family, so a Harvest
+# series missing them silently drops out of any filtered request.
+extraLabels:
+  az: local-a
+  env: demo
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi

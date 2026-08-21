@@ -1,0 +1,57 @@
+{{- if not .Values.otlpEndpoint }}
+{{- fail "demo-workloads.otlpEndpoint is required: with no OTLP endpoint the workloads emit no spans and the graph has no call edges" }}
+{{- end }}
+{{- range $w := .Values.workloads }}
+apiVersion: apps/v1
+kind: {{ $w.kind }}
+metadata:
+  name: {{ $w.name }}
+  namespace: {{ $w.namespace }}
+  labels:
+    {{- include "demo-workloads.labels" $ | nindent 4 }}
+    {{- include "demo-workloads.podLabels" $w | nindent 4 }}
+spec:
+  replicas: {{ default 1 $w.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $w.name }}
+  {{- if eq $w.kind "StatefulSet" }}
+  serviceName: {{ $w.name }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "demo-workloads.podLabels" $w | nindent 8 }}
+    spec:
+      # These pods never call the Kubernetes API; the graph is assembled from
+      # metrics, not from anything the workload itself looks up.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        {{- include "demo-workloads.container" (dict "root" $ "w" $w) | nindent 8 }}
+      {{- if $w.pvc }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $w.name }}-data
+      {{- end }}
+  {{- if $w.storage }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        # Annotations on a volumeClaimTemplate reach the generated PVCs, which
+        # is what gives a StatefulSet's claims an `application` in the graph.
+        annotations:
+          argocd.argoproj.io/tracking-id: {{ include "demo-workloads.trackingID" (dict "app" $w.application "kind" "PersistentVolumeClaim" "ns" $w.namespace "name" (printf "data-%s" $w.name)) | quote }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ $w.storage.className }}
+        resources:
+          requests:
+            storage: {{ $w.storage.size }}
+  {{- end }}
+---
+{{- end }}

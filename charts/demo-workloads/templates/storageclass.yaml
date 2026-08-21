@@ -1,0 +1,15 @@
+{{- if .Values.storageClass.create }}
+# Not really NetApp. The provisioner is whatever the local cluster already has
+# (kind ships rancher.io/local-path); the ONLY thing this class changes is the
+# name, which is what netapp-faker keys its discovery query off and what a PVC
+# reports as data.storageclass.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "demo-workloads.labels" . | nindent 4 }}
+provisioner: {{ .Values.storageClass.provisioner }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+{{- end }}

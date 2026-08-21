@@ -1,0 +1,146 @@
+# The workloads the graph is actually a picture of.
+#
+# Every box in the panel below the cluster level comes from these entries: real
+# Deployments, StatefulSets, Services, EndpointSlices and PersistentVolumeClaims
+# that kube-state-metrics reports and that call each other over HTTP so the
+# collector's servicegraph connector has real spans to pair.
+#
+# All of them run the SAME image. What a demo workload "is" — gateway, mid-tier,
+# storage leaf — is entirely a matter of who it calls and what it mounts.
+image:
+  repository: ksg-demo/tools
+  tag: local
+  pullPolicy: Never
+
+# REQUIRED. OTLP/gRPC endpoint of the collector running the servicegraph connector.
+otlpEndpoint: ''
+
+namespaces:
+  - shop
+  - platform
+
+# A StorageClass that pretends to be NetApp-backed. It is really kind's
+# local-path provisioner: claims bind for real and get real `pvc-<uuid>` PV
+# names, which is the only thing the fake Harvest series need to join against.
+storageClass:
+  create: true
+  name: netapp-nas
+  provisioner: rancher.io/local-path
+  volumeBindingMode: WaitForFirstConsumer
+  reclaimPolicy: Delete
+
+# Default think time; each workload may override.
+defaults:
+  latency: 25ms
+  errorRate: 0
+  port: 8080
+
+workloads:
+  # --- shop / storefront -----------------------------------------------------
+  - name: loadgen
+    namespace: shop
+    application: storefront
+    kind: Deployment
+    replicas: 1
+    # No inbound listener: this is the traffic source that makes every other
+    # edge exist. Without it the whole graph would be topology and no RED.
+    listen: false
+    callInterval: 500ms
+    upstreams:
+      - http://edge-gateway.shop.svc.cluster.local:8080/
+
+  - name: edge-gateway
+    namespace: shop
+    application: storefront
+    kind: Deployment
+    replicas: 2
+    service: true
+    latency: 20ms
+    upstreams:
+      - http://catalog.shop.svc.cluster.local:8080/
+      - http://orders.shop.svc.cluster.local:8080/
+
+  # --- shop / catalog --------------------------------------------------------
+  - name: catalog
+    namespace: shop
+    application: catalog
+    kind: Deployment
+    replicas: 2
+    service: true
+    latency: 35ms
+    upstreams:
+      - http://redis.shop.svc.cluster.local:8080/
+    # Reaches mongodb through its SERVICE rather than by calling a pod, which is
+    # the only thing that makes the graph draw a service node plus its
+    # service-selects-pod fan-out. `orders` still calls the mongodb pods
+    # directly, so the demo shows both shapes for the same backend.
+    dbEndpoints:
+      - mongodb://mongodb.shop.svc.cluster.local:27017
+
+  - name: redis
+    namespace: shop
+    application: catalog
+    kind: Deployment
+    replicas: 1
+    service: true
+    latency: 4ms
+    # Deliberately on the DEFAULT StorageClass, not the NetApp one: this claim
+    # is the control case. It gets a PVC node and no storage chain, which is how
+    # an operator tells "never meant to have a NetApp backend" apart from
+    # "should have joined and did not".
+    pvc:
+      size: 1Gi
+      className: standard
+      mountPath: /data
+
+  # --- shop / orders ---------------------------------------------------------
+  - name: orders
+    namespace: shop
+    application: orders
+    kind: Deployment
+    replicas: 2
+    service: true
+    latency: 30ms
+    # Non-zero on purpose: an edge with errorRate 0.05 and an edge with no
+    # measurement at all must look different in the panel.
+    errorRate: 0.05
+    upstreams:
+      - http://mongodb.shop.svc.cluster.local:8080/
+      - http://nats.platform.svc.cluster.local:8080/
+
+  # --- shop / data-plane -----------------------------------------------------
+  - name: mongodb
+    namespace: shop
+    application: data-plane
+    kind: StatefulSet
+    replicas: 2
+    service: true
+    headless: true
+    latency: 8ms
+    storage:
+      size: 1Gi
+      className: netapp-nas
+      mountPath: /data
+    # Writes real bytes so the claim reports a moving used-bytes figure.
+    fillData: true
+
+  # --- platform / messaging --------------------------------------------------
+  - name: nats
+    namespace: platform
+    application: messaging
+    kind: StatefulSet
+    replicas: 1
+    service: true
+    latency: 5ms
+    storage:
+      size: 1Gi
+      className: netapp-nas
+      mountPath: /data
+    fillData: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi

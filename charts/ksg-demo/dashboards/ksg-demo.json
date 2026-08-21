@@ -1,0 +1,296 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "ksg-default"
+      },
+      "gridPos": {
+        "h": 18,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "layout": "fcose",
+        "showLegend": true,
+        "alertPodListVariable": "alert_pod_list",
+        "alertNameListVariable": "alert_names",
+        "selectedPodVariable": "selected_pod",
+        "clusterVariable": "cluster_sel"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}&${namespace:customqueryparam:namespace:}&${name:customqueryparam:name:}&${edge_type:customqueryparam:edge_type:}",
+          "url_options": {
+            "method": "GET"
+          }
+        }
+      ],
+      "title": "Cluster Topology",
+      "type": "marz32one-ksg-panel"
+    },
+    {
+      "id": 99,
+      "type": "text",
+      "title": "Selected pod / cluster / alert exports (consumer)",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 7
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Selected pod / cluster\n\nClick any pod or controller node in the graph above: a pod exports its own name, a controller exports all of its child pod names — both cases also export the resolved cluster name. A sibling log panel (e.g. Loki/ClickHouse) can filter on `${selected_pod}` and `${cluster_sel}`.\n\nselected_pod: `${selected_pod}`\n\ncluster_sel: `${cluster_sel}`\n\n### Alert pod list / alert names (exported)\n\nThis backend demo's seed fixture (`dev/victoriametrics/topology.prom`) has no alert data contract, so `alert_pod_list` and `alert_names` always resolve to `$__empty` here — this is a documented seed-data limitation, not a panel fault. See the **KSG Showcase** dashboard (`ksg-switch-demo`, inline fixture) for a working example with real alert-carrying nodes (`mongo-2`, `mesh-gateway-0`, `worker-1`, `data-mongo-2`).\n\nalert_pod_list: `${alert_pod_list}`\n\nalert_names: `${alert_names}`"
+      },
+      "transparent": false
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ksg", "kubernetes"],
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": {
+          "type": "yesoreyeram-infinity-datasource",
+          "uid": "ksg-default"
+        },
+        "query": {
+          "refId": "variable-cluster",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "/v1/clusters",
+          "url_options": {
+            "method": "GET"
+          },
+          "root_selector": "clusters",
+          "columns": [
+            {
+              "selector": "name",
+              "text": "name",
+              "type": "string"
+            }
+          ]
+        },
+        "multi": true,
+        "includeAll": true,
+        "refresh": 1,
+        "current": {},
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "yesoreyeram-infinity-datasource",
+          "uid": "ksg-default"
+        },
+        "query": {
+          "refId": "variable-namespace",
+          "type": "uql",
+          "source": "url",
+          "format": "table",
+          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}",
+          "url_options": {
+            "method": "GET"
+          },
+          "uql": "parse-json | scope \"elements.nodes\" | project \"namespace\"=\"data.labels.namespace\" | summarize by \"namespace\" | order by \"namespace\" asc"
+        },
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "current": {},
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "name",
+        "label": "Resource name",
+        "type": "query",
+        "datasource": {
+          "type": "yesoreyeram-infinity-datasource",
+          "uid": "ksg-default"
+        },
+        "query": {
+          "refId": "variable-name",
+          "type": "uql",
+          "source": "url",
+          "format": "table",
+          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}&${namespace:customqueryparam:namespace:}",
+          "url_options": {
+            "method": "GET"
+          },
+          "uql": "parse-json | scope \"elements.nodes\" | project \"name\"=\"data.name\" | summarize by \"name\" | order by \"name\" asc"
+        },
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "current": {},
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "edge_type",
+        "label": "Edge type",
+        "type": "query",
+        "datasource": {
+          "type": "yesoreyeram-infinity-datasource",
+          "uid": "ksg-default"
+        },
+        "query": {
+          "refId": "variable-edge_type",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "/v1/edge-types",
+          "url_options": {
+            "method": "GET"
+          },
+          "root_selector": "edge_types",
+          "columns": [
+            {
+              "selector": "type",
+              "text": "type",
+              "type": "string"
+            }
+          ]
+        },
+        "multi": true,
+        "includeAll": true,
+        "refresh": 1,
+        "current": {},
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "alert_pod_list",
+        "label": "Alert pod list (exported)",
+        "description": "Written by the KSG panel after each graph load \u2014 pod names that currently have at least one alert (any severity); $__empty means a loaded graph with zero alerting pods. custom + multi + allowCustomValue so it can carry the multi-value writes this produces \u2014 a plain textbox variable cannot hold multiple values. This backend demo's seed fixture (dev/victoriametrics/topology.prom) has no alert data contract, so this variable is always $__empty here \u2014 see the ksg-switch-demo dashboard (inline fixture) for a working example with real alert data (mesh-gateway-0, mongo-2).",
+        "type": "custom",
+        "query": "$__empty",
+        "multi": true,
+        "allowCustomValue": true,
+        "includeAll": false,
+        "current": {
+          "selected": false,
+          "text": "$__empty",
+          "value": "$__empty"
+        },
+        "options": [
+          {
+            "text": "$__empty",
+            "value": "$__empty",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "alert_names",
+        "label": "Alert names (exported)",
+        "description": "Written by the KSG panel after each graph load \u2014 distinct alert names found across all node kinds (pod/node/pvc/service/controller), any severity; $__empty means zero alerts in the loaded graph. custom + multi + allowCustomValue for the same reason as alert_pod_list. This backend demo's seed fixture (dev/victoriametrics/topology.prom) has no alert data contract, so this variable is always $__empty here \u2014 see the ksg-switch-demo dashboard (inline fixture) for a working example with real alert data (~12 distinct alert names).",
+        "type": "custom",
+        "query": "$__empty",
+        "multi": true,
+        "allowCustomValue": true,
+        "includeAll": false,
+        "current": {
+          "selected": false,
+          "text": "$__empty",
+          "value": "$__empty"
+        },
+        "options": [
+          {
+            "text": "$__empty",
+            "value": "$__empty",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "selected_pod",
+        "label": "Selected pod",
+        "description": "Written by the KSG panel on left-click of a pod (single name) or controller (all child pod names), regardless of status. custom + multi + allowCustomValue so it can hold pod-name value(s) outside any fixed option list — a plain textbox variable cannot carry the multi-value writes a controller click produces. Consume from a sibling log panel, e.g. ${selected_pod:lucene}. $__empty means nothing selected yet.",
+        "type": "custom",
+        "query": "$__empty",
+        "multi": true,
+        "allowCustomValue": true,
+        "includeAll": false,
+        "current": {
+          "selected": false,
+          "text": "$__empty",
+          "value": "$__empty"
+        },
+        "options": [
+          {
+            "text": "$__empty",
+            "value": "$__empty",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "cluster_sel",
+        "label": "Selected cluster",
+        "description": "Written by the KSG panel alongside selected_pod on pod/controller click — the resolved cluster name. custom + multi + allowCustomValue (multi is normally unused since a click resolves to a single cluster; kept for shape consistency with selected_pod). Consume from a sibling log panel, e.g. ${cluster_sel:lucene}. $__empty means unresolved/nothing selected.",
+        "type": "custom",
+        "query": "$__empty",
+        "multi": true,
+        "allowCustomValue": true,
+        "includeAll": false,
+        "current": {
+          "selected": false,
+          "text": "$__empty",
+          "value": "$__empty"
+        },
+        "options": [
+          {
+            "text": "$__empty",
+            "value": "$__empty",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "KSG Demo",
+  "uid": "ksg-demo",
+  "version": 2,
+  "weekStart": ""
+}

@@ -1,0 +1,85 @@
+{{- if not .Values.promURL }}
+{{- fail "kube-state-graph.promURL is required: the server builds every graph from PromQL and has no other data source" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-state-graph.fullname" . }}
+  labels:
+    {{- include "kube-state-graph.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-state-graph.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-state-graph.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # The server needs no Kubernetes API access at all — its entire input is
+      # PromQL against VictoriaMetrics.
+      automountServiceAccountToken: false
+      containers:
+        - name: kube-state-graph
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --prom-url={{ .Values.promURL }}
+            - --listen-addr={{ .Values.listenAddr }}
+            - --log-level={{ .Values.logLevel }}
+            - --az-label={{ .Values.azLabel }}
+            - --env-label={{ .Values.envLabel }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            # The server dials VictoriaMetrics on /readyz, and in this demo both
+            # start at once — give the upstream time to come up rather than
+            # flapping the pod through NotReady on the first few probes.
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      securityContext:
+        runAsNonRoot: true
+        # Numeric, not the image's `nonroot` name: with runAsNonRoot set and
+        # only a named user in the image, the kubelet cannot verify the user is
+        # non-root and refuses to start the container.
+        runAsUser: 65532
+        runAsGroup: 65532
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

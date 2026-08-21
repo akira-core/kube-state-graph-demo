@@ -1,0 +1,20 @@
+{{- /*
+The dashboards are copied verbatim from the panel submodule by
+`make sync-dashboards`, so they stay whatever the panel repo ships and are not
+re-authored here. The ConfigMap name is fixed because Grafana's
+`dashboardsConfigMaps` values key has to name it from a subchart, where the
+release name is not addressable.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ksg-dashboards
+  labels:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/part-of: ksg-demo
+data:
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}

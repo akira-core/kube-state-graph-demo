@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kube-state-graph
+description: The kube-state-graph API server — builds the pod / node / PVC graph from PromQL.
+type: application
+version: 0.1.0
+appVersion: demo

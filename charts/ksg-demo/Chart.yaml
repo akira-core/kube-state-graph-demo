@@ -1,0 +1,48 @@
+apiVersion: v2
+name: ksg-demo
+description: >-
+  The whole kube-state-graph demo in one release: a synthetic Kubernetes estate,
+  the metrics pipeline that describes it, and the Grafana panel that draws it.
+type: application
+version: 0.1.0
+appVersion: demo
+
+# Every dependency is pinned. A demo whose meaning changes when an upstream
+# chart moves is not a demo — the exact kube-state-metrics chart below is the
+# one the backend's own preconditions doc was verified against (8.4.0 / KSM
+# 2.20.0), and the collector must be a build carrying the servicegraph connector.
+dependencies:
+  # Read/write split storage. Cluster flavour rather than single-node because
+  # the backend talks to vmselect's tenant-scoped Prometheus API, and that path
+  # (/select/<accountID>/prometheus) only exists in the cluster build.
+  - name: victoria-metrics-cluster
+    version: 0.49.0
+    repository: https://victoriametrics.github.io/helm-charts/
+
+  # The topology source. Six collectors, fifteen series — see values.yaml.
+  - name: kube-state-metrics
+    version: 8.4.0
+    repository: https://prometheus-community.github.io/helm-charts
+
+  # Scrapes kube-state-metrics and the kubelets, turns demo traces into
+  # service-graph metrics, and stamps the cluster / az / env external labels
+  # that kube-state-metrics itself cannot produce.
+  - name: opentelemetry-collector
+    version: 0.170.0
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+
+  - name: grafana
+    version: 10.5.15
+    repository: https://grafana.github.io/helm-charts
+
+  - name: kube-state-graph
+    version: 0.1.0
+    repository: file://../kube-state-graph
+
+  - name: netapp-faker
+    version: 0.1.0
+    repository: file://../netapp-faker
+
+  - name: demo-workloads
+    version: 0.1.0
+    repository: file://../demo-workloads

@@ -1,0 +1,36 @@
+# Three nodes on purpose: the graph nests pods under the K8s node they run on,
+# and a single-node cluster makes that nesting invisible. Zone labels come along
+# so kube_node_labels carries something worth propagating.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ksg-demo
+
+nodes:
+  - role: control-plane
+    labels:
+      topology.kubernetes.io/zone: zone-a
+      topology.kubernetes.io/region: local
+    extraPortMappings:
+      # Grafana. The demo's front door. 3001 rather than 3000 so this can run
+      # beside the panel repo's own docker-compose demo, which owns 3000.
+      - containerPort: 30300
+        hostPort: 3001
+        protocol: TCP
+      # kube-state-graph's REST API, for curling /v1/graph directly.
+      - containerPort: 30080
+        hostPort: 18080
+        protocol: TCP
+      # vmselect, for checking with plain PromQL what the graph is built from.
+      - containerPort: 30481
+        hostPort: 18481
+        protocol: TCP
+
+  - role: worker
+    labels:
+      topology.kubernetes.io/zone: zone-a
+      topology.kubernetes.io/region: local
+
+  - role: worker
+    labels:
+      topology.kubernetes.io/zone: zone-b
+      topology.kubernetes.io/region: local

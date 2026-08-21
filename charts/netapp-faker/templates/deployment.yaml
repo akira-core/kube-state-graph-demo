@@ -1,0 +1,60 @@
+{{- if or (not .Values.vmSelectURL) (not .Values.vmInsertURL) }}
+{{- fail "netapp-faker needs both vmSelectURL (to discover claims) and vmInsertURL (to push the fake estate)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "netapp-faker.fullname" . }}
+  labels:
+    {{- include "netapp-faker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "netapp-faker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "netapp-faker.selectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: netapp-faker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/netapp-faker"]
+          env:
+            - name: VM_SELECT_URL
+              value: {{ .Values.vmSelectURL | quote }}
+            - name: VM_INSERT_URL
+              value: {{ .Values.vmInsertURL | quote }}
+            - name: STORAGE_CLASS
+              value: {{ .Values.storageClass | quote }}
+            - name: ONTAP_CLUSTER
+              value: {{ .Values.ontapCluster | quote }}
+            - name: ONTAP_SVM
+              value: {{ .Values.ontapSVM | quote }}
+            - name: INTERVAL
+              value: {{ .Values.interval | quote }}
+            - name: LOOKBACK
+              value: {{ .Values.lookback | quote }}
+            - name: EMIT_VOLUME_STATS
+              value: {{ .Values.emitVolumeStats | quote }}
+            - name: EXTRA_LABELS
+              value: {{ include "netapp-faker.extraLabels" . | quote }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      securityContext:
+        runAsNonRoot: true
+        # Numeric, not the image's `nonroot` name: with runAsNonRoot set and
+        # only a named user in the image, the kubelet cannot verify the user is
+        # non-root and refuses to start the container.
+        runAsUser: 65532
+        runAsGroup: 65532

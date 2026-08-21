@@ -1,0 +1,6 @@
+apiVersion: v2
+name: netapp-faker
+description: Synthesises the NetApp ONTAP Harvest series behind the demo's PersistentVolumeClaims.
+type: application
+version: 0.1.0
+appVersion: demo
