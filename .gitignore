@@ -1,8 +1,10 @@
-# Helm pulls the pinned upstream charts here; they are reproducible from
-# Chart.lock and would otherwise be vendored into every commit.
-charts/ksg-demo/charts/
-
 # Local build scratch.
+#
+# This also covers charts/ksg-demo/charts/*.tgz, which is what we want: the
+# three first-party subcharts are repackaged from charts/<name>/ on every
+# `make deps`, and a committed copy would be a second, staler source of truth.
+# The four UPSTREAM subcharts are not archives — they are vendored unpacked as
+# directories, so they are tracked and diffable.
 *.tgz
 .DS_Store
 

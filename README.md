@@ -165,6 +165,54 @@ kube-state-graph/        ── git submodule
 kube-state-graph-panel/  ── git submodule
 ```
 
+### Chart dependencies are vendored, unpacked
+
+The four upstream charts are committed under `charts/ksg-demo/charts/` as plain
+directories, not fetched at bring-up and not stored as `.tgz`:
+
+```
+charts/ksg-demo/charts/
+  grafana/                   10.5.15    ── vendored, tracked
+  kube-state-metrics/        8.4.0      ── vendored, tracked
+  opentelemetry-collector/   0.170.0    ── vendored, tracked
+  victoria-metrics-cluster/  0.49.0     ── vendored, tracked
+  *.tgz                                 ── the three local ones, rebuilt by make deps
+```
+
+`helm dependency update` re-resolves every pin against its repo index, which
+makes a disconnected `make up` fail before a single pod is scheduled — and it
+also means the demo's meaning could shift under a moving index. So `make deps`
+does not touch the network: it packages the three first-party subcharts from
+source and asserts the four vendored ones are present *at the version
+`Chart.lock` pins*. Helm does not re-check that for an unpacked subchart, so a
+hand-edited or half-updated directory would otherwise install silently.
+
+Unpacked rather than archived because a directory is reviewable: a version bump
+arrives as a readable diff instead of an opaque binary blob, which for a repo
+whose whole substance is wiring is the difference between a reviewable upgrade
+and a leap of faith.
+
+The first-party subcharts are deliberately *not* committed. They are the only
+dependencies whose content changes between commits, and a checked-in copy would
+be a second, staler source of truth — edit `demo-workloads/values.yaml`, forget
+to repackage, and the install would quietly use the old one.
+
+To move a pin, edit `charts/ksg-demo/Chart.yaml` and then, **online**:
+
+```bash
+make vendor-charts    # helm dependency update, unpack, then list what to commit
+```
+
+Commit the subchart directories together with `Chart.lock`; the two must move
+as one or `make deps` reports the vendored set as stale.
+
+Vendoring the charts is not by itself enough to bring the demo up on a
+disconnected laptop — `kind create cluster`, the three `docker build`s (base
+images, `go mod download`, `npm ci`), the seven upstream container images and
+Grafana's Infinity plugin download all still reach out. What it does buy is that
+none of that happens at *Helm* time, and that a warm Docker cache is the only
+other thing standing between a cold checkout and an offline bring-up.
+
 Both first-party projects are **git submodules**, and every image is built from
 them locally and side-loaded into kind with `kind load docker-image` — no
 registry involved. To demo an unpushed local change, point the build at your own

@@ -92,8 +92,8 @@ sync-dashboards: ## Copy the panel repo's dashboards into the umbrella chart
 	./scripts/sync-dashboards.sh
 
 .PHONY: deps
-deps: ## Fetch the upstream chart dependencies
-	$(HELM) dependency update charts/ksg-demo
+deps: ## Package the local subcharts and verify the vendored upstream ones (offline)
+	./scripts/charts-deps.sh
 
 .PHONY: install
 install: ## Install or upgrade the ksg-demo release
@@ -168,3 +168,7 @@ lint: ## Vet the Go tools and lint every chart
 .PHONY: template
 template: ## Render the umbrella chart without installing it
 	$(HELM) template $(RELEASE) charts/ksg-demo --namespace $(NAMESPACE)
+
+.PHONY: vendor-charts
+vendor-charts: ## Re-fetch the vendored upstream subcharts (NEEDS NETWORK; commit the result)
+	./scripts/vendor-charts.sh
