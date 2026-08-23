@@ -48,7 +48,7 @@ make down        # delete the kind cluster
 make verify      # walk every hop of the pipeline and report which one is empty
 make status      # pods across monitoring / shop / platform, plus PVCs
 make graph       # raw /v1/graph JSON for the last 5 minutes
-make lint        # gofmt -l + go vet on tools/, then helm lint on all four charts
+make lint        # gofmt -l + go vet on tools/, then helm lint on all five charts
 make template    # render the umbrella chart without installing
 
 make vendor-charts   # NEEDS NETWORK — refresh the vendored upstream subcharts
@@ -82,7 +82,7 @@ Grafana is on 3001 so this can run beside the panel repo's own docker-compose de
 |---|---|
 | `charts/ksg-demo/values.yaml` | the whole pipeline: VM, kube-state-metrics, OTel Collector, backend, faker, Grafana. Most changes land here |
 | `charts/demo-workloads/values.yaml` | the estate the graph is a picture of — 7 workloads across `shop` / `platform` |
-| `charts/kube-state-graph/`, `charts/netapp-faker/` | local charts for the two first-party deployments |
+| `charts/kube-state-graph/`, `charts/netapp-faker/`, `charts/nfs-server/` | local charts for the three first-party deployments. `nfs-server` is one Ganesha process exporting a single directory — no upstream chart exports a writable share without also being a provisioner, and a provisioner's Ganesha only exports directories it created for its own PVs |
 | `tools/cmd/demo-app` | one binary playing every workload role; role is entirely env config |
 | `tools/cmd/netapp-faker` | the only fake component — discovers PVCs from vmselect, renders ONTAP series |
 | `scripts/verify.sh` | one check per pipeline precondition, in data-flow order |

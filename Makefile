@@ -159,6 +159,7 @@ lint: ## Vet the Go tools and lint every chart
 	$(HELM) lint charts/kube-state-graph --set promURL=http://x
 	$(HELM) lint charts/netapp-faker --set vmSelectURL=http://x --set vmInsertURL=http://x
 	$(HELM) lint charts/demo-workloads --set otlpEndpoint=http://x:4317
+	$(HELM) lint charts/nfs-server
 	$(HELM) lint charts/ksg-demo
 
 .PHONY: template
