@@ -42,7 +42,6 @@ func run() error {
 		"ontap_cluster", cfg.OntapCluster,
 		"svm", cfg.SVM,
 		"interval", cfg.Interval,
-		"emit_volume_stats", cfg.VolumeStats,
 		"extra_labels", cfg.ExtraLabels,
 	)
 

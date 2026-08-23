@@ -1,9 +1,9 @@
 # Local build scratch.
 #
 # This also covers charts/ksg-demo/charts/*.tgz, which is what we want: the
-# three first-party subcharts are repackaged from charts/<name>/ on every
+# first-party subcharts are repackaged from charts/<name>/ on every
 # `make deps`, and a committed copy would be a second, staler source of truth.
-# The four UPSTREAM subcharts are not archives — they are vendored unpacked as
+# The UPSTREAM subcharts are not archives — they are vendored unpacked as
 # directories, so they are tracked and diffable.
 *.tgz
 .DS_Store

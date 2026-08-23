@@ -47,13 +47,34 @@ next bring-up.
   backend.
   - Adds `vmalert` to the release. The demo currently has no rules engine.
 
-- **The demo owns its dashboards.** `charts/ksg-demo/dashboards/` becomes a source
-  directory in this repository rather than a copy target. The panel repo's
-  dev-fixture text panel is removed. `sync-dashboards` leaves the `make up` chain and
-  survives only as an explicit, opt-in import for pulling a newer panel-repo dashboard
-  in on purpose.
+- **The demo becomes the sole owner of its dashboards.** `charts/ksg-demo/dashboards/`
+  becomes authored source rather than a copy target, and its dev-fixture text panel is
+  removed. Pulling the submodules to their current branches settled how far this goes:
+  the panel repository deleted `provisioning/dashboards/ksg-demo.json` in `bf1a7c9`
+  ("render the demo from a typed fixture, drop the backend stack"), so this repository
+  now holds the last copy, and what a sync would fetch instead is a generated fixture
+  dashboard. `sync-dashboards` is therefore deleted outright rather than kept as an
+  opt-in import — an import that can only destroy is not worth a door.
   - **BREAKING** for anyone relying on `make up` to refresh dashboards from the panel
-    submodule: it no longer does.
+    submodule, and for anyone invoking `make sync-dashboards`: both are gone.
+
+- **The dashboard's filters stop depending on the graph API.** The backend's `/v1` group
+  now serves only `/v1/graph` and `/v1/edge-types`; the dashboard's `Cluster` variable
+  still queries the removed `/v1/clusters` and gets a `404` — live today, and invisible,
+  because under "All" the empty interpolation simply applies no filter and the graph
+  draws fine. The `cluster`, `env` and `namespace` filters move to `kube_pod_info` label
+  queries, which is where the backend's own filters match anyway, and an `env` filter is
+  added so the backend's environment path is exercised at all. That every URL the
+  dashboard calls resolves becomes something `make verify` asserts.
+  - The `Resource name` filter goes with it. The backend withdrew `?name=` alongside
+    `/v1/clusters` and ignores unknown parameters silently, so the control populated,
+    accepted a selection and changed nothing — the dead-endpoint failure one layer in,
+    where the dropdown is full instead of empty and therefore looks right.
+  - A `Projection` control is added for the backend's `?prune=`. The dashboard sent no
+    `prune` and so inherited the pruned default, drawing 8 of the cluster's 38 pods,
+    while `scripts/verify.sh` asserts against `prune=false` — two artifacts in this
+    repository disagreeing by 30 pods with nothing saying so. The default position is
+    unchanged behaviour; the second reaches the estate the prune removes.
 
 - **Documentation follows.** The README's "What the demo cannot show" section loses
   both of its entries; `scripts/verify.sh` gains a check per newly-real signal, in the
@@ -105,17 +126,18 @@ Code:
   `claimSamples`) and the `fallbackClaimCapacityB` constant that only served them.
 
 Build and scripts:
-- `Makefile` — `sync-dashboards` leaves the `up` chain and is renamed to an explicit
-  import target.
-- `scripts/verify.sh` — checks for real volume stats and for the recording rule's
-  output.
-- `scripts/vendor-charts.sh` / `charts-deps.sh` — unchanged in behaviour, but the
-  vendored set grows, enlarging the offline surface this repo just committed to.
+- `Makefile` — `sync-dashboards` deleted, along with `scripts/sync-dashboards.sh`.
+- `scripts/verify.sh` — checks for real volume stats, for the recording rule's output,
+  and that every backend URL the provisioned dashboards call resolves.
+- `scripts/vendor-charts.sh` / `charts-deps.sh` — unchanged in behaviour; the vendored
+  set grows by two charts.
 
-Dependencies and offline bring-up:
-- Two new upstream charts to vendor, plus their container images. `make up` is expected
-  to keep working with no network for the Helm phase; the image side of offline
-  bring-up was already an open item and this change makes it slightly larger.
+Dependencies:
+- Two new upstream charts. Every chart dependency this demo installs must be vendored
+  in-tree — pinned in `Chart.lock` and tracked unpacked under `charts/ksg-demo/charts/`
+  — so a version bump is a reviewable diff and bring-up never re-resolves a pin against
+  a repo index. Their container images are pulled as usual; this change makes no claim
+  about running with no network.
 
 Documentation:
 - `README.md` — "What is real and what is not" table, "What the demo cannot show"

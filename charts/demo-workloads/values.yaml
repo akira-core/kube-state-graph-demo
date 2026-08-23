@@ -19,15 +19,20 @@ namespaces:
   - shop
   - platform
 
-# A StorageClass that pretends to be NetApp-backed. It is really kind's
-# local-path provisioner: claims bind for real and get real `pvc-<uuid>` PV
-# names, which is the only thing the fake Harvest series need to join against.
+# A StorageClass that pretends to be NetApp-backed. Provisioned over NFS by
+# csi-driver-nfs against the in-cluster Ganesha export, so the kubelet reports
+# real kubelet_volume_stats_* for every claim on this class.
 storageClass:
   create: true
   name: netapp-nas
-  provisioner: rancher.io/local-path
-  volumeBindingMode: WaitForFirstConsumer
+  provisioner: nfs.csi.k8s.io
+  volumeBindingMode: Immediate
   reclaimPolicy: Delete
+  parameters:
+    server: nfs-server.monitoring.svc.cluster.local
+    share: /
+  mountOptions:
+    - nfsvers=4.1
 
 # Default think time; each workload may override.
 defaults:

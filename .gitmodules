@@ -5,4 +5,4 @@
 [submodule "kube-state-graph-panel"]
 	path = kube-state-graph-panel
 	url = git@github.com:akira-core/kube-state-graph-panel.git
-	branch = sync-netapp-storage-nodes
+	branch = node-group-compound-parent

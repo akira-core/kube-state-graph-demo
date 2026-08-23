@@ -39,7 +39,7 @@ help: ## Show this help
 ##@ Whole demo
 
 .PHONY: up
-up: submodules cluster images load sync-dashboards deps install wait ## Build and run the entire demo from scratch
+up: submodules cluster images load deps install wait ## Build and run the entire demo from scratch
 	@$(MAKE) --no-print-directory urls
 
 .PHONY: down
@@ -86,10 +86,6 @@ image-tools: ## Build the demo workload + netapp-faker image
 .PHONY: load
 load: ## Side-load the local images into the kind nodes
 	kind load docker-image --name $(CLUSTER) $(BACKEND_IMAGE) $(PANEL_IMAGE) $(TOOLS_IMAGE)
-
-.PHONY: sync-dashboards
-sync-dashboards: ## Copy the panel repo's dashboards into the umbrella chart
-	./scripts/sync-dashboards.sh
 
 .PHONY: deps
 deps: ## Package the local subcharts and verify the vendored upstream ones (offline)

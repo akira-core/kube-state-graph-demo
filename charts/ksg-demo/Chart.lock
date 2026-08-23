@@ -11,6 +11,12 @@ dependencies:
 - name: grafana
   repository: https://grafana.github.io/helm-charts
   version: 10.5.15
+- name: victoria-metrics-alert
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.47.0
+- name: csi-driver-nfs
+  repository: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+  version: 4.13.4
 - name: kube-state-graph
   repository: file://../kube-state-graph
   version: 0.1.0
@@ -20,5 +26,8 @@ dependencies:
 - name: demo-workloads
   repository: file://../demo-workloads
   version: 0.1.0
-digest: sha256:d159b601fbb455310d4f2201b9883da64236afc1a72ed937e276e4f090a4d02f
-generated: "2026-08-21T23:18:46.187591+08:00"
+- name: nfs-server
+  repository: file://../nfs-server
+  version: 0.1.0
+digest: sha256:9d41b454f6cb90a6e2ad3650a9574a01d037d96e64713a4093940d7190e4a784
+generated: "2026-08-22T22:14:07.045673+08:00"

@@ -25,7 +25,7 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 | Submodule | Tracked branch |
 |---|---|
 | `kube-state-graph` | `replace-storageclass-with-netapp-nodes` |
-| `kube-state-graph-panel` | `sync-netapp-storage-nodes` |
+| `kube-state-graph-panel` | `node-group-compound-parent` |
 
 Each has its own `CLAUDE.md` with its own conventions — read the relevant one
 before editing inside it. Changes inside a submodule belong to *that* repository:
@@ -43,7 +43,7 @@ make redeploy-panel   PANEL_SRC=../kube-state-graph-panel
 ## Commands
 
 ```bash
-make up          # submodules → cluster → images → load → dashboards → deps → install → wait
+make up          # submodules → cluster → images → load → deps → install → wait
 make down        # delete the kind cluster
 make verify      # walk every hop of the pipeline and report which one is empty
 make status      # pods across monitoring / shop / platform, plus PVCs
@@ -112,16 +112,15 @@ every URL that names it.
 is not live until it is both re-loaded and rolled out — that is what the
 `redeploy-*` targets do.
 
-**Dashboards are copied, not authored here.** `charts/ksg-demo/dashboards/*.json`
-is overwritten wholesale by `make sync-dashboards` from
-`kube-state-graph-panel/provisioning/dashboards/`. Edit them in the panel
-submodule and re-sync; edits made here are lost on the next `make up`.
+**Dashboards are authored here.** `charts/ksg-demo/dashboards/ksg-demo.json` is
+tracked source. Bring-up must not replace it from the panel submodule — that
+tree no longer publishes a backend-backed dashboard, only a generated fixture.
 
 **Chart dependencies are vendored unpacked, and `make deps` is offline.** The
-four upstream subcharts live under `charts/ksg-demo/charts/` as tracked
+upstream subcharts live under `charts/ksg-demo/charts/` as tracked
 **directories**, not `.tgz` — Helm loads either, and a directory makes a version
 bump a reviewable diff instead of an opaque blob. `make deps`
-(`scripts/charts-deps.sh`) only packages the three first-party subcharts from
+(`scripts/charts-deps.sh`) only packages the first-party subcharts from
 source and asserts each vendored directory carries the version `Chart.lock`
 pins. It never runs `helm dependency update` — that would re-resolve every pin
 against a repo index and break a disconnected bring-up.
@@ -130,7 +129,7 @@ The version assertion is not redundant: Helm does **not** re-check the version
 of an unpacked subchart, so a hand-edited or half-updated directory would
 install silently.
 
-The three first-party archives are gitignored (covered by the blanket `*.tgz`)
+The first-party archives are gitignored (covered by the blanket `*.tgz`)
 on purpose: they are repackaged on every `make deps`, and a committed copy would
 be a second, staler source of truth. To move an upstream pin, edit `Chart.yaml`
 then run `make vendor-charts` **online** — it updates, unpacks, and lists what
@@ -157,9 +156,31 @@ Before changing any of these, know what it removes:
   the HTTP instrumentation also sets (`server.address`) would make every genuinely
   lost span pair masquerade as a resolvable peer.
 - **kube-state-metrics allowlists are not defaults.** `metricLabelsAllowlist`
-  (endpointslice service name, node zone/region) and `metricAnnotationsAllowList`
-  (ArgoCD tracking-id on services and PVCs) are what produce `service-selects-pod`
-  edges and the `application` grouping.
+  (endpointslice service name, node zone/region, pod `app.kubernetes.io/instance`)
+  and `metricAnnotationsAllowList` (ArgoCD tracking-id on services and PVCs)
+  are what produce `service-selects-pod` edges and the service/PVC `application`
+  grouping. The pod instance label is also what the recording rule copies.
+- **The vmalert recording rule is the only source of pod `argocd_tracking_id`.**
+  If the rule stops, pods keep their controller owners and lose application
+  nesting. The expression must stay guarded (`argocd_tracking_id=""`) or
+  VictoriaMetrics rejects the self-join as duplicate timeseries.
+- **`netapp-nas` must be a CSI volume that implements `NodeGetVolumeStats`.**
+  kind's local-path (hostPath) PVs produce no `kubelet_volume_stats_*`. The
+  demo uses `csi-driver-nfs` against the in-cluster Ganesha export.
+- **Every backend URL in a provisioned dashboard must still exist, and every
+  parameter it sends must still be honoured.** A removed `/v1/...` path empties a
+  dropdown and leaves the graph drawing, which is the failure this demo exists to
+  catch. A *withdrawn parameter* is the same failure one layer in and harder to
+  see: the backend ignores unknown parameters without error, so the control
+  populates, accepts a selection, and moves nothing. `?name=` was exactly that and
+  the control is gone. `cluster` / `env` / `namespace` are sourced from
+  `kube_pod_info`, not from the graph API.
+- **The dashboard's `Projection` control is the backend's `?prune=`.** Its default,
+  `Traffic graph` (`prune=true`), draws only workload sitting on a connectivity
+  edge — 8 of the demo's 38 pods. `scripts/verify.sh` and `scripts/wait-ready.sh`
+  request `prune=false`, so the harness and the panel agree only in the
+  `Full inventory` position. A panel showing fewer pods than `make verify` counts
+  is the prune, not a broken pipeline.
 - **The storage join is exactly one equality**:
   `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name`.
   Nothing else. `netapp-faker` discovers claims from vmselect each tick and writes
@@ -181,11 +202,6 @@ A demo where everything is green teaches nothing. These are intentional:
   an HTTP call, which is the only thing producing `pod-calls-service` plus its
   `service-selects-pod` fan-out. `orders` calls the same pods over HTTP, so both
   shapes appear.
-
-`netapp-faker.emitVolumeStats: true` is a **kind-specific** override: kind's
-local-path PVs are hostPath-backed and the kubelet exposes no
-`kubelet_volume_stats_*` for them at all, so there is no real series to collide
-with. On a real cluster this must be off.
 
 ## Debugging order
 

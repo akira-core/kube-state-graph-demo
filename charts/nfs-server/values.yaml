@@ -1,0 +1,26 @@
+# One Ganesha process exporting a single directory. csi-driver-nfs is the
+# provisioner; this chart is only the server.
+image:
+  repository: registry.k8s.io/sig-storage/nfs-provisioner
+  tag: v4.0.8
+  pullPolicy: IfNotPresent
+
+fullnameOverride: nfs-server
+
+# The directory Ganesha exports as NFS `/`. CSI creates one subdirectory per claim.
+exportPath: /export
+
+persistence:
+  enabled: true
+  # kind's default local-path class. The NFS server itself is hostPath-backed;
+  # only the demo claims go through CSI.
+  storageClass: standard
+  size: 20Gi
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

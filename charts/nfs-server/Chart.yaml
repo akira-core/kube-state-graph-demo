@@ -1,0 +1,8 @@
+apiVersion: v2
+name: nfs-server
+description: >-
+  In-cluster NFS Ganesha export that csi-driver-nfs carves subdirectories from.
+  Userspace Ganesha rather than kernel nfsd, which does not load inside kind nodes.
+type: application
+version: 0.1.0
+appVersion: "4.0.8"

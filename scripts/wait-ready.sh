@@ -15,6 +15,15 @@ echo "==> waiting for the platform namespace (${ns})"
 ${kubectl} -n "${ns}" wait --for=condition=Available --timeout=10m \
   deployment --all
 
+# NFS CSI claims cannot bind until both the Ganesha export and the node plugin
+# are up. The node plugin is a DaemonSet, so the Deployment wait above misses it.
+if ${kubectl} -n "${ns}" get deploy nfs-server >/dev/null 2>&1; then
+  ${kubectl} -n "${ns}" wait --for=condition=Available --timeout=10m deploy/nfs-server
+fi
+if ${kubectl} -n "${ns}" get ds csi-nfs-node >/dev/null 2>&1; then
+  ${kubectl} -n "${ns}" rollout status ds/csi-nfs-node --timeout=10m
+fi
+
 echo "==> waiting for the demo workloads"
 for workload_ns in shop platform; do
   # Enumerate rather than using --all: a namespace holding only StatefulSets

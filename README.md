@@ -34,7 +34,8 @@ doing real work:
 | Real | Faked |
 |---|---|
 | Pods, Services, EndpointSlices, PVCs — actual Kubernetes objects on a 3-node kind cluster | The **NetApp ONTAP array**: aggregates, controllers, FlexVol topology and QoS I/O |
-| kube-state-metrics, scraped for the 15 series the graph reads | The **kubelet volume stats**, because kind's PVs cannot produce them (see below) |
+| kube-state-metrics, scraped for the topology series the graph reads | |
+| Real kubelet volume stats for claims on `netapp-nas` (CSI NFS `NodeGetVolumeStats`) | |
 | Real HTTP calls between workloads, traced with OpenTelemetry | |
 | The service-graph metrics, derived from those traces by the collector | |
 
@@ -130,44 +131,33 @@ A demo where everything is green teaches nothing. These are on purpose:
   distinct from the series being absent.
 - **`mongodb`'s Service is headless**, so its `cluster_ip` is `None` and it
   carries no ipaddress — again distinct from an unknown one.
-
-### What the demo cannot show
-
-**Pod-level `application`.** Services and PVCs get theirs from
-`argocd.argoproj.io/tracking-id` annotations, which stock kube-state-metrics can
-expose. The pod-level value is read from an `argocd_tracking_id` label on
-`kube_pod_owner`, and no kube-state-metrics configuration can produce it —
-see *Pod-level ArgoCD Application is not reachable by KSM config* in the
-backend's `docs/kube-state-metrics-preconditions.md` for the two honest routes
-(a recording rule, or a code change). Pods therefore nest under
-`cluster > namespace > controller > pod`.
-
-**Real kubelet volume stats.** kind's local-path PersistentVolumes are
-hostPath-backed and the kubelet exposes no `kubelet_volume_stats_*` for them at
-all — its `/stats/summary` reports an empty volume list per pod. Since there is
-no real series to collide with, `netapp-faker` stands in for that too
-(`netapp-faker.emitVolumeStats: true`), sized from each claim's actual request.
-On a real cluster, turn it off.
+- **Shared NFS export capacity.** `csi-driver-nfs` reports `statfs` of the
+  in-cluster Ganesha export, so every claim on `netapp-nas` shows that
+  export's size as `capacity_bytes`, not the claim's request. The demo
+  proves the kubelet series exist and join; numeric per-claim fidelity is
+  not what it demonstrates.
 
 ## Layout
 
 ```
 charts/
-  ksg-demo/          umbrella release: pins every upstream chart + the three local ones
+  ksg-demo/          umbrella release: pins every upstream chart + the local ones
+  ksg-demo/dashboards/  authored KSG Demo dashboard (this repo is the source)
   kube-state-graph/  the API server
   netapp-faker/      the one fake component
   demo-workloads/    namespaces, StorageClass, workloads, Services, claims
+  nfs-server/        in-cluster Ganesha export for csi-driver-nfs
 docker/              three Dockerfiles: backend, panel bundle, demo tools
 kind/cluster.yaml    3 nodes, zone labels, host port mappings
 tools/               Go: the demo workload and the ONTAP faker
-scripts/             sync-dashboards, wait-ready, verify
+scripts/             wait-ready, verify, charts-deps, vendor-charts
 kube-state-graph/        ── git submodule
 kube-state-graph-panel/  ── git submodule
 ```
 
 ### Chart dependencies are vendored, unpacked
 
-The four upstream charts are committed under `charts/ksg-demo/charts/` as plain
+The upstream charts are committed under `charts/ksg-demo/charts/` as plain
 directories, not fetched at bring-up and not stored as `.tgz`:
 
 ```
@@ -176,7 +166,9 @@ charts/ksg-demo/charts/
   kube-state-metrics/        8.4.0      ── vendored, tracked
   opentelemetry-collector/   0.170.0    ── vendored, tracked
   victoria-metrics-cluster/  0.49.0     ── vendored, tracked
-  *.tgz                                 ── the three local ones, rebuilt by make deps
+  victoria-metrics-alert/    0.47.0     ── vendored, tracked
+  csi-driver-nfs/            4.13.4     ── vendored, tracked
+  *.tgz                                 ── first-party charts, rebuilt by make deps
 ```
 
 `helm dependency update` re-resolves every pin against its repo index, which
@@ -241,13 +233,16 @@ from inside a subchart's values.
 Grafana is on **3001**, not the usual 3000, so this can run beside the panel
 repo's own `docker-compose` demo.
 
-Two dashboards are provisioned, copied verbatim from the panel repo by
-`make sync-dashboards`:
-
-- **KSG Demo** — the real thing, reading `/v1/graph` through the Infinity
-  datasource.
-- **KSG Showcase (backend-free)** — an inline fixture, useful for comparing
-  panel behaviour against known data.
+One dashboard is provisioned, authored in this repository at
+`charts/ksg-demo/dashboards/ksg-demo.json`. Bring-up does not copy from the
+panel submodule: that tree deleted the backend-backed dashboard and now
+ships only a generated fixture, so a sync could only destroy the demo's
+copy. `cluster`, `env` and `namespace` filters are `kube_pod_info` label
+queries through VictoriaMetrics; `edge_type` calls the backend. `Projection`
+switches the backend's `?prune=`: **Traffic graph** (the default) draws only
+workload sitting on a connectivity edge, **Full inventory** draws every loaded
+pod plus the infrastructure nothing references — which is what `make verify`
+asserts against, so the two agree only in that position.
 
 ## Troubleshooting
 
