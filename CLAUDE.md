@@ -208,8 +208,16 @@ A demo where everything is green teaches nothing. These are intentional:
 1. `make verify` — it asserts each precondition in the order data flows and names
    what breaks when it is empty. Start here, always.
 2. An empty graph in the first minute after `make up` is expected: the backend
-   builds over a window and nothing has been scraped yet. `make wait` blocks
-   until a `pvc-to-netapp-aggr` edge exists — the longest chain, therefore the
-   last thing to appear.
+   builds over a window and nothing has been scraped yet. `make wait` blocks on
+   **two** storage signals, because neither implies the other: a
+   `pvc-to-netapp-aggr` edge (the longest chain — kube-state-metrics through the
+   faker's discovery and back) **and** kubelet usage on every claim that joined
+   (the CSI leg). The faker never reads a kubelet, so the join completes while
+   the kubelet leg is still missing — the CSI node plugin answers
+   `NodeGetVolumeStats` with `remote I/O error` for a minute or two after a cold
+   bring-up, and the collector keeps only `kubelet_volume_stats_*` from that
+   scrape job, so that whole job contributes nothing until it settles. Gating on
+   the join alone let `make up` return two minutes early and `make verify` fail
+   three checks that were merely not-yet.
 3. Cross-check with raw PromQL at the vmselect URL when the graph disagrees with
    what you think the metrics say.
