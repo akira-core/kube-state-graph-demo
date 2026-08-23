@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -19,7 +18,6 @@ type config struct {
 	SVM          string        // the storage virtual machine every fake volume lives in
 	Interval     time.Duration // push cadence
 	Lookback     time.Duration // discovery window against vmselect
-	VolumeStats  bool          // also emit kubelet_volume_stats_* for matched claims
 	ExtraLabels  map[string]string
 }
 
@@ -32,7 +30,6 @@ func loadConfig() (config, error) {
 		SVM:          envStr("ONTAP_SVM", "svm_demo"),
 		Interval:     15 * time.Second,
 		Lookback:     10 * time.Minute,
-		VolumeStats:  envBool("EMIT_VOLUME_STATS", false),
 	}
 	if cfg.SelectURL == "" || cfg.InsertURL == "" {
 		return cfg, fmt.Errorf("VM_SELECT_URL and VM_INSERT_URL are both required")
@@ -86,18 +83,6 @@ func envStr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func envBool(key string, def bool) bool {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return def
-	}
-	return b
 }
 
 func envDur(key string, def time.Duration) (time.Duration, error) {

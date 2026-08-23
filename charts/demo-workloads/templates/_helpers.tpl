@@ -22,6 +22,7 @@ selector, so it must be unique per workload within a namespace.
 */}}
 {{- define "demo-workloads.podLabels" -}}
 app.kubernetes.io/name: {{ .name }}
+app.kubernetes.io/instance: {{ .application }}
 demo.ksg.io/application: {{ .application }}
 {{- end -}}
 

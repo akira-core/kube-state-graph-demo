@@ -30,6 +30,45 @@ victoria-metrics-cluster:
       enabled: false
 
 # ---------------------------------------------------------------------------
+# vmalert — one recording rule: join the GitOps instance label onto
+# kube_pod_owner as argocd_tracking_id. Additive: the scraped series stays,
+# so if this pod dies the graph keeps controller owners and only loses
+# application grouping. No Alertmanager: recording-only, drop alerts.
+# ---------------------------------------------------------------------------
+victoria-metrics-alert:
+  server:
+    fullnameOverride: vmalert
+    replicaCount: 1
+    datasource:
+      url: http://vm-vmselect:8481/select/0/prometheus
+    remoteWrite:
+      url: http://vm-vminsert:8480/insert/0/prometheus
+    remoteRead:
+      url: http://vm-vmselect:8481/select/0/prometheus
+    extraArgs:
+      notifier.blackhole: true
+    config:
+      alerts:
+        groups:
+          - name: ksg-demo-pod-application
+            interval: 15s
+            rules:
+              - record: kube_pod_owner
+                # Guarded: recording under the same name we read is
+                # self-referential. Without {argocd_tracking_id=""} the
+                # next eval joins scraped + recorded rows onto the same
+                # output and VictoriaMetrics 422s. Scoped to shop/platform
+                # so Helm's instance=release-name on monitoring pods does
+                # not invent a ksg-demo Application.
+                expr: |
+                  label_replace(
+                    kube_pod_owner{namespace=~"shop|platform",argocd_tracking_id=""}
+                      * on (cluster, namespace, pod) group_left (label_app_kubernetes_io_instance)
+                      kube_pod_labels{namespace=~"shop|platform"},
+                    "argocd_tracking_id", "$1", "label_app_kubernetes_io_instance", "(.+)"
+                  )
+
+# ---------------------------------------------------------------------------
 # kube-state-metrics — the topology half of the graph.
 #
 # The collector list and the two allowlists below are lifted from the backend's
@@ -47,10 +86,12 @@ kube-state-metrics:
     - replicasets
     - services
 
-  # Exactly the 15 series the graph reads, and nothing else.
+  # The 15 series the graph reads, plus kube_pod_labels which the recording
+  # rule joins onto kube_pod_owner. Nothing else.
   metricAllowlist:
     - kube_pod_info
     - kube_pod_owner
+    - kube_pod_labels
     - kube_pod_container_info
     - kube_pod_spec_volumes_persistentvolumeclaims_info
     - kube_node_info
@@ -64,9 +105,6 @@ kube-state-metrics:
     - kube_replicaset_owner
     - kube_endpointslice_endpoints
     - kube_endpointslice_labels
-    # Not read by the graph. netapp-faker uses it to size the volume stats it
-    # stands in for, so a claim's reported capacity matches what it asked for.
-    - kube_persistentvolumeclaim_resource_requests_storage_bytes
 
   # NOT a kube-state-metrics default, and REQUIRED: without it
   # kube_endpointslice_labels carries no label_kubernetes_io_service_name, the
@@ -78,6 +116,10 @@ kube-state-metrics:
   metricLabelsAllowlist:
     - endpointslices=[kubernetes.io/service-name]
     - nodes=[topology.kubernetes.io/zone,topology.kubernetes.io/region]
+    # The GitOps instance label the recording rule copies onto kube_pod_owner
+    # as argocd_tracking_id. Without this, kube_pod_labels carries no
+    # label_app_kubernetes_io_instance and pods never nest under an application.
+    - pods=[app.kubernetes.io/instance]
 
   # Gives Services and PVCs their `application`, which is what nests them under
   # an application group in the panel.
@@ -286,15 +328,32 @@ netapp-faker:
   vmSelectURL: http://vm-vmselect:8481/select/0/prometheus
   vmInsertURL: http://vm-vminsert:8480/insert/0/prometheus
   storageClass: netapp-nas
-  # ON here, unlike the chart default. kind's local-path PersistentVolumes are
-  # hostPath-backed, and the kubelet exposes no kubelet_volume_stats_* for those
-  # at all (its /stats/summary reports an empty volume list) — so there is no
-  # real series for this to collide with, and without it no claim in the demo
-  # would show a usage fill.
-  emitVolumeStats: true
   extraLabels:
     az: local-a
     env: demo
+
+# ---------------------------------------------------------------------------
+# In-cluster NFS server — one Ganesha export. csi-driver-nfs provisions a
+# subdirectory per claim on it. 20Gi is enough for every demo claim (design
+# Open Question 1 — the figure is a non-goal).
+# ---------------------------------------------------------------------------
+nfs-server:
+  fullnameOverride: nfs-server
+  persistence:
+    storageClass: standard
+    size: 20Gi
+
+# ---------------------------------------------------------------------------
+# CSI NFS driver — NodeGetVolumeStats is what makes kubelet_volume_stats_*
+# exist for the demo claims. Controller stays at 1 replica: it uses hostNetwork
+# and a fixed liveness-probe host port, so two replicas cannot share a node.
+# ---------------------------------------------------------------------------
+csi-driver-nfs:
+  controller:
+    replicas: 1
+    dnsPolicy: ClusterFirstWithHostNet
+  node:
+    dnsPolicy: ClusterFirstWithHostNet
 
 # ---------------------------------------------------------------------------
 # The estate being drawn.
@@ -304,6 +363,14 @@ demo-workloads:
   storageClass:
     create: true
     name: netapp-nas
+    provisioner: nfs.csi.k8s.io
+    volumeBindingMode: Immediate
+    reclaimPolicy: Delete
+    parameters:
+      server: nfs-server.monitoring.svc.cluster.local
+      share: /
+    mountOptions:
+      - nfsvers=4.1
 
 # ---------------------------------------------------------------------------
 # Grafana — anonymous Admin, because this is a laptop demo with no secrets in it.

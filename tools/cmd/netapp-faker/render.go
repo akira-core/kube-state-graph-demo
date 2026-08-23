@@ -9,11 +9,6 @@ import (
 
 const (
 	kib = 1 << 10
-	gib = 1 << 30
-
-	// Fallback claim capacity, used only when kube-state-metrics did not expose
-	// the claim's requested size.
-	fallbackClaimCapacityB = 10 * gib
 )
 
 type sample struct {
@@ -105,25 +100,6 @@ func claimSamples(cfg config, c claim, now time.Time) []sample {
 		{"qos_write_data", workload, writeOps * 16 * kib},
 	}
 
-	// The kubelet legs are a stand-in for a kubelet that reports nothing for
-	// this volume plugin — not part of the NetApp simulation. Off by default;
-	// see the chart values for when turning them on is honest.
-	if cfg.VolumeStats {
-		claimLabels := map[string]string{
-			"cluster":               c.Cluster, // Kubernetes cluster here, not ONTAP
-			"namespace":             c.Namespace,
-			"persistentvolumeclaim": c.Name,
-		}
-		capacity := c.CapacityB
-		if capacity <= 0 {
-			capacity = fallbackClaimCapacityB
-		}
-		used := wobble(seed(c.VolumeName, "used", 0.25, 0.85)*capacity, now, c.VolumeName+"u")
-		out = append(out,
-			sample{"kubelet_volume_stats_capacity_bytes", claimLabels, capacity},
-			sample{"kubelet_volume_stats_used_bytes", claimLabels, used},
-		)
-	}
 	return out
 }
 

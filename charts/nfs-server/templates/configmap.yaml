@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nfs-server.fullname" . }}
+  labels:
+    {{- include "nfs-server.labels" . | nindent 4 }}
+data:
+  ganesha.conf: |
+    NFS_CORE_PARAM {
+        Protocols = 3, 4;
+        mount_path_pseudo = true;
+        MNT_Port = 20048;
+        NLM_Port = 32803;
+        Rquota_Port = 875;
+        fsid_device = false;
+    }
+    NFSV4 {
+        Grace_Period = 0;
+    }
+    EXPORT {
+        Export_Id = 1;
+        Path = {{ .Values.exportPath }};
+        Pseudo = /;
+        Protocols = 3, 4;
+        Transports = UDP, TCP;
+        Access_Type = RW;
+        Squash = None;
+        SecType = sys;
+        Disable_ACL = true;
+        FSAL {
+            Name = VFS;
+        }
+    }
+  entrypoint.sh: |
+    #!/bin/bash
+    set -eu
+    mkdir -p /run/dbus /var/run/ganesha /var/lib/nfs/ganesha /usr/local/var/run/ganesha
+    if ! /usr/sbin/rpcinfo 127.0.0.1 >/dev/null 2>&1; then
+      /usr/sbin/rpcbind -w
+    fi
+    /usr/sbin/rpc.statd --port 662 || true
+    dbus-daemon --system --nopidfile || true
+    exec /usr/local/bin/ganesha.nfsd -F -L /dev/stdout -p /var/run/ganesha.pid -f /etc/ganesha/ganesha.conf

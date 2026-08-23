@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nfs-server.fullname" . }}
+  labels:
+    {{- include "nfs-server.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: nfs-tcp
+      port: 2049
+      targetPort: nfs-tcp
+      protocol: TCP
+    - name: nfs-udp
+      port: 2049
+      targetPort: nfs-udp
+      protocol: UDP
+    - name: rpcbind-tcp
+      port: 111
+      targetPort: rpcbind-tcp
+      protocol: TCP
+    - name: rpcbind-udp
+      port: 111
+      targetPort: rpcbind-udp
+      protocol: UDP
+    - name: mountd-tcp
+      port: 20048
+      targetPort: mountd-tcp
+      protocol: TCP
+    - name: mountd-udp
+      port: 20048
+      targetPort: mountd-udp
+      protocol: UDP
+  selector:
+    {{- include "nfs-server.selectorLabels" . | nindent 4 }}

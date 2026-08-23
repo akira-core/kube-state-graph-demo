@@ -23,11 +23,6 @@ ontapSVM: svm_demo
 interval: 15s
 lookback: 10m
 
-# kubelet reports real volume stats for the demo claims, so leave this off.
-# Turn it on only where the backing volume plugin reports nothing — two sources
-# for the same series would leave the builder picking one at random.
-emitVolumeStats: false
-
 # Stamped onto every emitted series. kube-state-graph pushes ?az= / ?env= to
 # upstream PromQL as raw matchers against EVERY topology family, so a Harvest
 # series missing them silently drops out of any filtered request.

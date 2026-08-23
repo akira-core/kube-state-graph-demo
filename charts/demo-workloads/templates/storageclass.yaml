@@ -1,7 +1,6 @@
 {{- if .Values.storageClass.create }}
-# Not really NetApp. The provisioner is whatever the local cluster already has
-# (kind ships rancher.io/local-path); the ONLY thing this class changes is the
-# name, which is what netapp-faker keys its discovery query off and what a PVC
+# Provisioned by csi-driver-nfs against the in-cluster Ganesha export. The
+# class name is what netapp-faker keys its discovery query off and what a PVC
 # reports as data.storageclass.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -12,4 +11,12 @@ metadata:
 provisioner: {{ .Values.storageClass.provisioner }}
 reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
 volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+{{- with .Values.storageClass.parameters }}
+parameters:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.storageClass.mountOptions }}
+mountOptions:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 {{- end }}

@@ -23,6 +23,25 @@ query() {
   query_expr "$1" "count(last_over_time($2[${WINDOW}]))" "$3"
 }
 
+# query_absent <label> <full-promql> <consequence-if-nonzero>
+# Inverse of query_expr: the PromQL must resolve to 0. Used for negative
+# proofs (no simulated kubelet series, etc.).
+query_absent() {
+  local label="$1" promql="$2" consequence="$3"
+  local count
+  count=$(curl -sS --max-time 20 --get "${VMSELECT}/api/v1/query" \
+    --data-urlencode "query=${promql}" 2>/dev/null \
+    | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)
+  count=${count:-0}
+  if [[ "${count}" != "0" && "${count}" != "null" ]]; then
+    printf '  \033[31mFAIL\033[0m  %-46s %s (%s series)\n' "${label}" "${consequence}" "${count}"
+    fail=$((fail + 1))
+  else
+    printf '  \033[32m ok \033[0m  %-46s 0 series\n' "${label}"
+    pass=$((pass + 1))
+  fi
+}
+
 # query_expr <label> <full-promql> <consequence-if-empty>
 query_expr() {
   local label="$1" promql="$2" consequence="$3"
@@ -57,10 +76,16 @@ echo "== 3. non-default kube-state-metrics allowlists =="
 query "endpointslice -> service join" 'kube_endpointslice_labels{label_kubernetes_io_service_name!=""}' "no service-selects-pod edges"
 query "service ArgoCD annotation"     'kube_service_annotations{annotation_argocd_argoproj_io_tracking_id!=""}' "services carry no application"
 query "pvc ArgoCD annotation"         'kube_persistentvolumeclaim_annotations{annotation_argocd_argoproj_io_tracking_id!=""}' "claims carry no application"
+query "pod argocd_tracking_id"        'kube_pod_owner{argocd_tracking_id!=""}'                "pods nest under controller, no application group"
 
 echo
-echo "== 4. kubelet volume stats =="
+echo "== 4. kubelet volume stats (real, collector-stamped) =="
 query "kubelet_volume_stats_used"     'kubelet_volume_stats_used_bytes'                      "claims show no usage fill"
+query "kubelet used carries az"       'kubelet_volume_stats_used_bytes{az!=""}'               "filtered ?az= drops claim usage"
+query "kubelet used carries env"      'kubelet_volume_stats_used_bytes{env!=""}'              "filtered ?env= drops claim usage"
+query_absent "no simulated volume stats" \
+  'count(last_over_time(kubelet_volume_stats_used_bytes['"${WINDOW}"']) unless last_over_time(kubelet_volume_stats_used_bytes{job="kubelet"}['"${WINDOW}"']))' \
+  "a non-kubelet job is publishing kubelet_volume_stats_* again"
 
 echo
 echo "== 5. service-graph metrics from the OTLP traces =="
@@ -96,6 +121,39 @@ else
   echo "  edges carrying RED metrics: $(jq '[.elements.edges[] | select(.data.metrics != null)] | length' <<<"${graph}")"
   echo "  claims joined to a NetApp aggregate: $(jq '[.elements.edges[] | select(.data.type == "pvc-to-netapp-aggr")] | length' <<<"${graph}")"
   pass=$((pass + 1))
+fi
+
+echo
+echo "== 8. provisioned dashboard backend URLs resolve =="
+# Every /v1 path the authored dashboard still calls. Relative URLs are
+# against the Infinity datasource (the graph API). A 404 here is the
+# silent-dropdown failure this check exists to catch.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+dash_dir="${repo_root}/charts/ksg-demo/dashboards"
+if [[ ! -d "${dash_dir}" ]]; then
+  printf '  \033[31mFAIL\033[0m  %s\n' "charts/ksg-demo/dashboards/ is missing"
+  fail=$((fail + 1))
+else
+  dash_paths=$(grep -RhoE '/v1/[A-Za-z0-9_/-]+' "${dash_dir}" | sort -u)
+  if [[ -z "${dash_paths}" ]]; then
+    printf '  \033[31mFAIL\033[0m  %s\n' "no /v1 paths found in provisioned dashboards"
+    fail=$((fail + 1))
+  fi
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] || continue
+    url="${BACKEND}${path}"
+    if [[ "${path}" == "/v1/graph" ]]; then
+      url="${url}?start=$(( now - 300 ))&end=${now}"
+    fi
+    code=$(curl -sS --max-time 20 -o /tmp/ksg-verify-dash.body -w '%{http_code}' "${url}" 2>/dev/null || echo 000)
+    if [[ "${code}" != 200 ]]; then
+      printf '  \033[31mFAIL\033[0m  %-46s HTTP %s\n' "${path}" "${code}"
+      fail=$((fail + 1))
+    else
+      printf '  \033[32m ok \033[0m  %-46s HTTP %s\n' "${path}" "${code}"
+      pass=$((pass + 1))
+    fi
+  done <<<"${dash_paths}"
 fi
 
 echo

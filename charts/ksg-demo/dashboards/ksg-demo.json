@@ -2,6 +2,7 @@
   "annotations": {
     "list": []
   },
+  "description": "Backend-backed topology from the running kube-state-graph demo. Authored in this repository.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -35,7 +36,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}&${namespace:customqueryparam:namespace:}&${name:customqueryparam:name:}&${edge_type:customqueryparam:edge_type:}",
+          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}&${env:customqueryparam:env:}&${namespace:customqueryparam:namespace:}&${edge_type:customqueryparam:edge_type:}&prune=${prune}",
           "url_options": {
             "method": "GET"
           }
@@ -43,28 +44,15 @@
       ],
       "title": "Cluster Topology",
       "type": "marz32one-ksg-panel"
-    },
-    {
-      "id": 99,
-      "type": "text",
-      "title": "Selected pod / cluster / alert exports (consumer)",
-      "gridPos": {
-        "x": 0,
-        "y": 18,
-        "w": 24,
-        "h": 7
-      },
-      "options": {
-        "mode": "markdown",
-        "content": "### Selected pod / cluster\n\nClick any pod or controller node in the graph above: a pod exports its own name, a controller exports all of its child pod names — both cases also export the resolved cluster name. A sibling log panel (e.g. Loki/ClickHouse) can filter on `${selected_pod}` and `${cluster_sel}`.\n\nselected_pod: `${selected_pod}`\n\ncluster_sel: `${cluster_sel}`\n\n### Alert pod list / alert names (exported)\n\nThis backend demo's seed fixture (`dev/victoriametrics/topology.prom`) has no alert data contract, so `alert_pod_list` and `alert_names` always resolve to `$__empty` here — this is a documented seed-data limitation, not a panel fault. See the **KSG Showcase** dashboard (`ksg-switch-demo`, inline fixture) for a working example with real alert-carrying nodes (`mongo-2`, `mesh-gateway-0`, `worker-1`, `data-mongo-2`).\n\nalert_pod_list: `${alert_pod_list}`\n\nalert_names: `${alert_names}`"
-      },
-      "transparent": false
     }
   ],
   "preload": false,
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["ksg", "kubernetes"],
+  "tags": [
+    "ksg",
+    "kubernetes"
+  ],
   "templating": {
     "list": [
       {
@@ -72,30 +60,35 @@
         "label": "Cluster",
         "type": "query",
         "datasource": {
-          "type": "yesoreyeram-infinity-datasource",
-          "uid": "ksg-default"
+          "type": "prometheus",
+          "uid": "victoriametrics"
         },
-        "query": {
-          "refId": "variable-cluster",
-          "type": "json",
-          "source": "url",
-          "format": "table",
-          "url": "/v1/clusters",
-          "url_options": {
-            "method": "GET"
-          },
-          "root_selector": "clusters",
-          "columns": [
-            {
-              "selector": "name",
-              "text": "name",
-              "type": "string"
-            }
-          ]
-        },
+        "query": "label_values(kube_pod_info, cluster)",
+        "definition": "label_values(kube_pod_info, cluster)",
         "multi": true,
         "includeAll": true,
         "refresh": 1,
+        "sort": 1,
+        "regex": "",
+        "current": {},
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "env",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "query": "label_values(kube_pod_info, env)",
+        "definition": "label_values(kube_pod_info, env)",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 1,
+        "sort": 1,
+        "regex": "",
         "current": {},
         "options": [],
         "hide": 0
@@ -105,49 +98,16 @@
         "label": "Namespace",
         "type": "query",
         "datasource": {
-          "type": "yesoreyeram-infinity-datasource",
-          "uid": "ksg-default"
+          "type": "prometheus",
+          "uid": "victoriametrics"
         },
-        "query": {
-          "refId": "variable-namespace",
-          "type": "uql",
-          "source": "url",
-          "format": "table",
-          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}",
-          "url_options": {
-            "method": "GET"
-          },
-          "uql": "parse-json | scope \"elements.nodes\" | project \"namespace\"=\"data.labels.namespace\" | summarize by \"namespace\" | order by \"namespace\" asc"
-        },
+        "query": "label_values(kube_pod_info, namespace)",
+        "definition": "label_values(kube_pod_info, namespace)",
         "multi": true,
         "includeAll": true,
-        "refresh": 2,
-        "current": {},
-        "options": [],
-        "hide": 0
-      },
-      {
-        "name": "name",
-        "label": "Resource name",
-        "type": "query",
-        "datasource": {
-          "type": "yesoreyeram-infinity-datasource",
-          "uid": "ksg-default"
-        },
-        "query": {
-          "refId": "variable-name",
-          "type": "uql",
-          "source": "url",
-          "format": "table",
-          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}&${namespace:customqueryparam:namespace:}",
-          "url_options": {
-            "method": "GET"
-          },
-          "uql": "parse-json | scope \"elements.nodes\" | project \"name\"=\"data.name\" | summarize by \"name\" | order by \"name\" asc"
-        },
-        "multi": true,
-        "includeAll": true,
-        "refresh": 2,
+        "refresh": 1,
+        "sort": 1,
+        "regex": "",
         "current": {},
         "options": [],
         "hide": 0
@@ -186,9 +146,37 @@
         "hide": 0
       },
       {
+        "name": "prune",
+        "label": "Projection",
+        "description": "Backend ?prune=. true (default) is the connectivity-connected subgraph: a pod is kept only if it sits on a pod-calls-pod / pod-calls-service / service-selects-pod edge, and the node or claim holding only dropped pods goes with it. false returns the inventory instead \u2014 every loaded pod plus unreferenced infrastructure, which is what scripts/verify.sh asserts against.",
+        "type": "custom",
+        "query": "Traffic graph : true, Full inventory : false",
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "selected": true,
+          "text": "Traffic graph",
+          "value": "true"
+        },
+        "options": [
+          {
+            "text": "Traffic graph",
+            "value": "true",
+            "selected": true
+          },
+          {
+            "text": "Full inventory",
+            "value": "false",
+            "selected": false
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
         "name": "alert_pod_list",
         "label": "Alert pod list (exported)",
-        "description": "Written by the KSG panel after each graph load \u2014 pod names that currently have at least one alert (any severity); $__empty means a loaded graph with zero alerting pods. custom + multi + allowCustomValue so it can carry the multi-value writes this produces \u2014 a plain textbox variable cannot hold multiple values. This backend demo's seed fixture (dev/victoriametrics/topology.prom) has no alert data contract, so this variable is always $__empty here \u2014 see the ksg-switch-demo dashboard (inline fixture) for a working example with real alert data (mesh-gateway-0, mongo-2).",
+        "description": "Written by the KSG panel after each graph load \u2014 pod names that currently have at least one alert (any severity); $__empty means a loaded graph with zero alerting pods. custom + multi + allowCustomValue so it can carry the multi-value writes this produces \u2014 a plain textbox variable cannot hold multiple values. This demo does not seed alerts, so the variable stays $__empty unless the running cluster produces some.",
         "type": "custom",
         "query": "$__empty",
         "multi": true,
@@ -212,7 +200,7 @@
       {
         "name": "alert_names",
         "label": "Alert names (exported)",
-        "description": "Written by the KSG panel after each graph load \u2014 distinct alert names found across all node kinds (pod/node/pvc/service/controller), any severity; $__empty means zero alerts in the loaded graph. custom + multi + allowCustomValue for the same reason as alert_pod_list. This backend demo's seed fixture (dev/victoriametrics/topology.prom) has no alert data contract, so this variable is always $__empty here \u2014 see the ksg-switch-demo dashboard (inline fixture) for a working example with real alert data (~12 distinct alert names).",
+        "description": "Written by the KSG panel after each graph load \u2014 distinct alert names found across all node kinds (pod/node/pvc/service/controller), any severity; $__empty means zero alerts in the loaded graph. custom + multi + allowCustomValue for the same reason as alert_pod_list. This demo does not seed alerts, so the variable stays $__empty unless the running cluster produces some.",
         "type": "custom",
         "query": "$__empty",
         "multi": true,
@@ -236,7 +224,7 @@
       {
         "name": "selected_pod",
         "label": "Selected pod",
-        "description": "Written by the KSG panel on left-click of a pod (single name) or controller (all child pod names), regardless of status. custom + multi + allowCustomValue so it can hold pod-name value(s) outside any fixed option list — a plain textbox variable cannot carry the multi-value writes a controller click produces. Consume from a sibling log panel, e.g. ${selected_pod:lucene}. $__empty means nothing selected yet.",
+        "description": "Written by the KSG panel on left-click of a pod (single name) or controller (all child pod names), regardless of status. custom + multi + allowCustomValue so it can hold pod-name value(s) outside any fixed option list \u2014 a plain textbox variable cannot carry the multi-value writes a controller click produces. Consume from a sibling log panel, e.g. ${selected_pod:lucene}. $__empty means nothing selected yet.",
         "type": "custom",
         "query": "$__empty",
         "multi": true,
@@ -260,7 +248,7 @@
       {
         "name": "cluster_sel",
         "label": "Selected cluster",
-        "description": "Written by the KSG panel alongside selected_pod on pod/controller click — the resolved cluster name. custom + multi + allowCustomValue (multi is normally unused since a click resolves to a single cluster; kept for shape consistency with selected_pod). Consume from a sibling log panel, e.g. ${cluster_sel:lucene}. $__empty means unresolved/nothing selected.",
+        "description": "Written by the KSG panel alongside selected_pod on pod/controller click \u2014 the resolved cluster name. custom + multi + allowCustomValue (multi is normally unused since a click resolves to a single cluster; kept for shape consistency with selected_pod). Consume from a sibling log panel, e.g. ${cluster_sel:lucene}. $__empty means unresolved/nothing selected.",
         "type": "custom",
         "query": "$__empty",
         "multi": true,

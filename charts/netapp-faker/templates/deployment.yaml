@@ -38,8 +38,6 @@ spec:
               value: {{ .Values.interval | quote }}
             - name: LOOKBACK
               value: {{ .Values.lookback | quote }}
-            - name: EMIT_VOLUME_STATS
-              value: {{ .Values.emitVolumeStats | quote }}
             - name: EXTRA_LABELS
               value: {{ include "netapp-faker.extraLabels" . | quote }}
           {{- with .Values.resources }}
