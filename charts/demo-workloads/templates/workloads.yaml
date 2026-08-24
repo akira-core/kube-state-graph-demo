@@ -10,6 +10,12 @@ metadata:
   labels:
     {{- include "demo-workloads.labels" $ | nindent 4 }}
     {{- include "demo-workloads.podLabels" $w | nindent 4 }}
+  annotations:
+    # ArgoCD stamps tracking-id on the workload it applies, never on the pods
+    # a controller spawns. kube-state-graph joins pod data.application from
+    # kube_{deployment,statefulset}_annotations once kube-state-metrics is
+    # started with --metric-annotations-allowlist for that kind.
+    argocd.argoproj.io/tracking-id: {{ include "demo-workloads.trackingID" (dict "app" $w.application "kind" $w.kind "ns" $w.namespace "name" $w.name) | quote }}
 spec:
   replicas: {{ default 1 $w.replicas }}
   selector:

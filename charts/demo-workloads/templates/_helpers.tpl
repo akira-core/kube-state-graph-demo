@@ -8,7 +8,8 @@ app.kubernetes.io/part-of: ksg-demo
 {{/*
 The ArgoCD tracking id kube-state-graph parses for `data.application`. It reads
 the segment before the FIRST colon and ignores the rest, so the tail only has to
-look like the real thing.
+look like the real thing. Stamped on the resources ArgoCD would apply
+(controller, Service, PVC) — never on the pods a controller spawns.
 
 Args: dict "app" <application> "kind" <Kind> "ns" <namespace> "name" <name>
 */}}

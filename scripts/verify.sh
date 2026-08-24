@@ -76,7 +76,8 @@ echo "== 3. non-default kube-state-metrics allowlists =="
 query "endpointslice -> service join" 'kube_endpointslice_labels{label_kubernetes_io_service_name!=""}' "no service-selects-pod edges"
 query "service ArgoCD annotation"     'kube_service_annotations{annotation_argocd_argoproj_io_tracking_id!=""}' "services carry no application"
 query "pvc ArgoCD annotation"         'kube_persistentvolumeclaim_annotations{annotation_argocd_argoproj_io_tracking_id!=""}' "claims carry no application"
-query "pod argocd_tracking_id"        'kube_pod_owner{argocd_tracking_id!=""}'                "pods nest under controller, no application group"
+query "deployment ArgoCD annotation"  'kube_deployment_annotations{annotation_argocd_argoproj_io_tracking_id!=""}' "Deployment-owned pods nest under controller, no application group"
+query "statefulset ArgoCD annotation" 'kube_statefulset_annotations{annotation_argocd_argoproj_io_tracking_id!=""}' "StatefulSet-owned pods nest under controller, no application group"
 
 echo
 echo "== 4. kubelet volume stats (real, collector-stamped) =="
@@ -121,6 +122,26 @@ else
   echo "  edges carrying RED metrics: $(jq '[.elements.edges[] | select(.data.metrics != null)] | length' <<<"${graph}")"
   echo "  claims joined to a NetApp aggregate: $(jq '[.elements.edges[] | select(.data.type == "pvc-to-netapp-aggr")] | length' <<<"${graph}")"
   pass=$((pass + 1))
+
+  # Pod application is joined from the controller annotation, not from a
+  # synthesised kube_pod_owner label. shop/platform are the estate the demo
+  # stamps; monitoring pods have no tracking-id and correctly stay ungrouped.
+  app_groups=$(jq '[.elements.nodes[] | select(.data.type == "application")] | length' <<<"${graph}")
+  unapp=$(jq '[.elements.nodes[] | select(.data.type == "pod") | select(.data.labels.namespace == "shop" or .data.labels.namespace == "platform") | select((.data.application // "") == "")] | length' <<<"${graph}")
+  if [[ "${app_groups}" == "0" ]]; then
+    printf '  \033[31mFAIL\033[0m  %-46s %s\n' "application group nodes" "controller tracking-id did not join"
+    fail=$((fail + 1))
+  else
+    printf '  \033[32m ok \033[0m  %-46s %s nodes\n' "application group nodes" "${app_groups}"
+    pass=$((pass + 1))
+  fi
+  if [[ "${unapp}" != "0" ]]; then
+    printf '  \033[31mFAIL\033[0m  %-46s %s missing data.application\n' "shop/platform pod application" "${unapp}"
+    fail=$((fail + 1))
+  else
+    printf '  \033[32m ok \033[0m  %-46s all carry data.application\n' "shop/platform pod application"
+    pass=$((pass + 1))
+  fi
 fi
 
 echo

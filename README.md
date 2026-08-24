@@ -166,7 +166,6 @@ charts/ksg-demo/charts/
   kube-state-metrics/        8.4.0      ── vendored, tracked
   opentelemetry-collector/   0.170.0    ── vendored, tracked
   victoria-metrics-cluster/  0.49.0     ── vendored, tracked
-  victoria-metrics-alert/    0.47.0     ── vendored, tracked
   csi-driver-nfs/            4.13.4     ── vendored, tracked
   *.tgz                                 ── first-party charts, rebuilt by make deps
 ```
@@ -174,8 +173,8 @@ charts/ksg-demo/charts/
 `helm dependency update` re-resolves every pin against its repo index, which
 makes a disconnected `make up` fail before a single pod is scheduled — and it
 also means the demo's meaning could shift under a moving index. So `make deps`
-does not touch the network: it packages the three first-party subcharts from
-source and asserts the four vendored ones are present *at the version
+does not touch the network: it packages the first-party subcharts from
+source and asserts the vendored ones are present *at the version
 `Chart.lock` pins*. Helm does not re-check that for an unpacked subchart, so a
 hand-edited or half-updated directory would otherwise install silently.
 
@@ -255,6 +254,8 @@ missing:
 == 3. non-default kube-state-metrics allowlists ==
    ok   endpointslice -> service join                  15 series
    ok   service ArgoCD annotation                      6 series
+   ok   deployment ArgoCD annotation                   5 series
+   ok   statefulset ArgoCD annotation                  2 series
 ```
 
 The graph is also empty for a mundane reason for the first minute or so: the

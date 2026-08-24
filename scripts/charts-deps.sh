@@ -7,8 +7,8 @@
 #
 # The two kinds of dependency are therefore handled differently:
 #
-#   upstream (victoria-metrics-cluster, victoria-metrics-alert,
-#   kube-state-metrics, opentelemetry-collector, grafana, csi-driver-nfs)
+#   upstream (victoria-metrics-cluster, kube-state-metrics,
+#   opentelemetry-collector, grafana, csi-driver-nfs)
 #   — vendored into git UNPACKED, as plain
 #   directories rather than .tgz. Helm loads either, and a directory is
 #   reviewable: a version bump shows up as a diff instead of an opaque binary
