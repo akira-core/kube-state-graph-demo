@@ -1,8 +1,8 @@
 [submodule "kube-state-graph"]
 	path = kube-state-graph
-	url = git@github.com:akira-core/kube-state-graph.git
+	url = https://github.com/akira-core/kube-state-graph
 	branch = replace-storageclass-with-netapp-nodes
 [submodule "kube-state-graph-panel"]
 	path = kube-state-graph-panel
-	url = git@github.com:akira-core/kube-state-graph-panel.git
+	url = https://github.com/akira-core/kube-state-graph-panel
 	branch = node-group-compound-parent
