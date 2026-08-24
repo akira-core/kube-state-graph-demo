@@ -39,6 +39,16 @@ victoria-metrics-cluster:
 kube-state-metrics:
   fullnameOverride: ksm
 
+  # Eleven collectors, covering all 22 series the backend queries. The first six
+  # carry the graph itself; the last five exist SOLELY to resolve pod ArgoCD
+  # Applications and are individually optional — omit any one and pods of that
+  # controller kind carry no `application`, and nothing else changes.
+  #
+  # Two of the five also carry an owner series the graph needs for more than
+  # Applications, so neither collector may be dropped to save cardinality:
+  # `replicasets` carries kube_replicaset_owner (the ReplicaSet -> Deployment
+  # skip) and `jobs` carries kube_job_owner (the Job -> CronJob hop). The
+  # per-resource annotation allowlist below is the lever instead.
   collectors:
     - endpointslices
     - nodes
@@ -47,14 +57,20 @@ kube-state-metrics:
     - replicasets
     - services
     # Pod ArgoCD Application: the tracking-id lives on the controller ArgoCD
-    # applied, never on the pods it spawns. Drop either and that kind's pods
-    # nest under controller with no application group.
+    # applied, never on the pods it spawns. Drop either the collector or the
+    # allowlist entry and that kind's pods nest under controller with no
+    # application group.
+    - cronjobs
+    - daemonsets
     - deployments
+    - jobs
     - statefulsets
 
-  # The series the graph reads. Nothing else. ReplicaSet / Job / DaemonSet /
-  # CronJob annotation families are omitted: this estate has none of those
-  # controller kinds as ArgoCD-applied objects.
+  # All 22 series the graph reads. Nothing else. This estate exercises only the
+  # Deployment and StatefulSet annotation families — the other four resolve to
+  # empty vectors here, which is the backend's designed per-family degradation
+  # rather than a fault. They are listed so this file is the reference config
+  # rather than the subset one demo happens to need.
   metricAllowlist:
     - kube_pod_info
     - kube_pod_owner
@@ -71,8 +87,14 @@ kube-state-metrics:
     - kube_replicaset_owner
     - kube_endpointslice_endpoints
     - kube_endpointslice_labels
+    # Pod ArgoCD Application.
+    - kube_job_owner
     - kube_deployment_annotations
     - kube_statefulset_annotations
+    - kube_daemonset_annotations
+    - kube_replicaset_annotations
+    - kube_job_annotations
+    - kube_cronjob_annotations
 
   # NOT a kube-state-metrics default, and REQUIRED: without it
   # kube_endpointslice_labels carries no label_kubernetes_io_service_name, the
@@ -86,12 +108,25 @@ kube-state-metrics:
     - nodes=[topology.kubernetes.io/zone,topology.kubernetes.io/region]
 
   # Gives Services, PVCs, and — through the pod's controller — pods their
-  # `application`, which is what nests them under an application group.
+  # `application`, which is what nests them under an application group. The flag
+  # is per-resource, so each line can be dropped on its own.
+  #
+  # `replicasets` and `jobs` are the two expensive families — old ReplicaSets are
+  # retained under a Deployment's revisionHistoryLimit and Jobs accumulate under
+  # a CronJob's history limits — and the ReplicaSet family is consulted only for
+  # a BARE ReplicaSet, the normal case having already collapsed to its
+  # Deployment. A cluster running no ArgoCD-managed bare ReplicaSets or Jobs can
+  # drop those two lines (and their two metricAllowlist entries) and pay nothing.
   metricAnnotationsAllowList:
     - services=[argocd.argoproj.io/tracking-id]
     - persistentvolumeclaims=[argocd.argoproj.io/tracking-id]
+    # Pod ArgoCD Application — one entry per controller kind you run.
     - deployments=[argocd.argoproj.io/tracking-id]
     - statefulsets=[argocd.argoproj.io/tracking-id]
+    - daemonsets=[argocd.argoproj.io/tracking-id]
+    - replicasets=[argocd.argoproj.io/tracking-id]
+    - jobs=[argocd.argoproj.io/tracking-id]
+    - cronjobs=[argocd.argoproj.io/tracking-id]
 
   rbac:
     create: true
