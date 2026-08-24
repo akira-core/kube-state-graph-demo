@@ -156,14 +156,16 @@ Before changing any of these, know what it removes:
   the HTTP instrumentation also sets (`server.address`) would make every genuinely
   lost span pair masquerade as a resolvable peer.
 - **kube-state-metrics allowlists are not defaults.** `metricLabelsAllowlist`
-  (endpointslice service name, node zone/region, pod `app.kubernetes.io/instance`)
-  and `metricAnnotationsAllowList` (ArgoCD tracking-id on services and PVCs)
-  are what produce `service-selects-pod` edges and the service/PVC `application`
-  grouping. The pod instance label is also what the recording rule copies.
-- **The vmalert recording rule is the only source of pod `argocd_tracking_id`.**
-  If the rule stops, pods keep their controller owners and lose application
-  nesting. The expression must stay guarded (`argocd_tracking_id=""`) or
-  VictoriaMetrics rejects the self-join as duplicate timeseries.
+  (endpointslice service name, node zone/region)
+  and `metricAnnotationsAllowList` (ArgoCD tracking-id on services, PVCs,
+  deployments and statefulsets) are what produce `service-selects-pod` edges and
+  the service / PVC / pod `application` grouping.
+- **Pod `application` is joined from the controller annotation.** ArgoCD stamps
+  `argocd.argoproj.io/tracking-id` on the Deployment / StatefulSet it applies,
+  never on the pods a controller spawns. kube-state-metrics must collect those
+  kinds and allowlist the annotation; there is no recording rule copying a
+  tracking-id onto `kube_pod_owner`. If either collector or allowlist is
+  dropped, pods keep their controller owners and lose application nesting.
 - **`netapp-nas` must be a CSI volume that implements `NodeGetVolumeStats`.**
   kind's local-path (hostPath) PVs produce no `kubelet_volume_stats_*`. The
   demo uses `csi-driver-nfs` against the in-cluster Ganesha export.

@@ -11,9 +11,6 @@ dependencies:
 - name: grafana
   repository: https://grafana.github.io/helm-charts
   version: 10.5.15
-- name: victoria-metrics-alert
-  repository: https://victoriametrics.github.io/helm-charts/
-  version: 0.47.0
 - name: csi-driver-nfs
   repository: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
   version: 4.13.4
