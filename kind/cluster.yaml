@@ -20,9 +20,17 @@ nodes:
       - containerPort: 30080
         hostPort: 18080
         protocol: TCP
-      # vmselect, for checking with plain PromQL what the graph is built from.
+      # vmselect, for checking with plain PromQL what the cluster store holds:
+      # the NetApp Harvest and service-graph series.
       - containerPort: 30481
         hostPort: 18481
+        protocol: TCP
+      # vmauth, the read path for the single-node store: kube-state-metrics and
+      # kubelet series. Needs `curl -u` — see charts/ksg-demo/values.yaml. Two
+      # ports because the graph is assembled from two stores, and a check that
+      # asked only one could not tell a routing fault from an empty estate.
+      - containerPort: 30427
+        hostPort: 18427
         protocol: TCP
 
   - role: worker

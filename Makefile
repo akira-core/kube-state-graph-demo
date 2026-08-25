@@ -24,10 +24,17 @@ BACKEND_IMAGE ?= ksg-demo/kube-state-graph:local
 PANEL_IMAGE   ?= ksg-demo/panel:local
 TOOLS_IMAGE   ?= ksg-demo/tools:local
 
-# Host ports, as mapped in kind/cluster.yaml.
+# Host ports, as mapped in kind/cluster.yaml. TWO stores: the graph is assembled
+# from both and the routing table in charts/ksg-demo/values.yaml decides which
+# query families go where.
 GRAFANA_URL  := http://localhost:3001
 BACKEND_URL  := http://localhost:18080
+# Cluster store — NetApp Harvest and service-graph series.
 VMSELECT_URL := http://localhost:18481/select/0/prometheus
+# Single-node store, through vmauth — kube-state-metrics and kubelet series.
+VMAUTH_URL   := http://localhost:18427
+VMAUTH_USER  ?= ksg
+VMAUTH_PASS  ?= ksg-demo-not-a-real-secret
 
 .PHONY: help
 help: ## Show this help
@@ -51,7 +58,8 @@ urls: ## Print the demo's entry points
 	@echo
 	@echo "  Grafana         $(GRAFANA_URL)      (anonymous admin; dashboard: kube-state-graph / KSG Demo)"
 	@echo "  Graph API       $(BACKEND_URL)/docs"
-	@echo "  VictoriaMetrics $(VMSELECT_URL)"
+	@echo "  VM cluster      $(VMSELECT_URL)   (harvest, service-graph)"
+	@echo "  VM single       $(VMAUTH_URL)   (kube-state-metrics, kubelet; -u $(VMAUTH_USER):...)"
 	@echo
 
 ##@ Pieces
@@ -126,7 +134,7 @@ redeploy-workloads: image-tools ## Rebuild the demo app and restart every worklo
 
 .PHONY: verify
 verify: ## Check every hop of the pipeline and report what the graph contains
-	./scripts/verify.sh $(VMSELECT_URL) $(BACKEND_URL)
+	./scripts/verify.sh $(VMSELECT_URL) $(BACKEND_URL) $(VMAUTH_URL) $(VMAUTH_USER) $(VMAUTH_PASS)
 
 .PHONY: status
 status: ## Show pods across every demo namespace

@@ -2,6 +2,15 @@ dependencies:
 - name: victoria-metrics-cluster
   repository: https://victoriametrics.github.io/helm-charts/
   version: 0.49.0
+- name: victoria-metrics-single
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.45.0
+- name: victoria-metrics-agent
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.46.0
+- name: victoria-metrics-auth
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.40.0
 - name: kube-state-metrics
   repository: https://prometheus-community.github.io/helm-charts
   version: 8.4.0
@@ -26,5 +35,5 @@ dependencies:
 - name: nfs-server
   repository: file://../nfs-server
   version: 0.1.0
-digest: sha256:9d41b454f6cb90a6e2ad3650a9574a01d037d96e64713a4093940d7190e4a784
-generated: "2026-08-22T22:14:07.045673+08:00"
+digest: sha256:f22596c44f8560b4695249abe459fa3c799f4ad1837b5a7a8da7280113c41884
+generated: "2026-08-25T21:48:45.862753+08:00"

@@ -26,6 +26,18 @@ spec:
           env:
             - name: VM_SELECT_URL
               value: {{ .Values.vmSelectURL | quote }}
+            {{- with .Values.vmSelectAuthSecret }}
+            - name: VM_SELECT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: username
+            - name: VM_SELECT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: password
+            {{- end }}
             - name: VM_INSERT_URL
               value: {{ .Values.vmInsertURL | quote }}
             - name: STORAGE_CLASS

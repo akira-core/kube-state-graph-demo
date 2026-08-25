@@ -19,14 +19,39 @@ dependencies:
     version: 0.49.0
     repository: https://victoriametrics.github.io/helm-charts/
 
+  # The second store. kube-state-graph's routing table splits the estate across
+  # both: kube-state-metrics and kubelet series land here, NetApp Harvest and
+  # the service-graph stay on the cluster install above. Single-node flavour on
+  # purpose — the two stores are meant to differ in shape, not just in name,
+  # and vmsingle serves the Prometheus API at /prometheus rather than at
+  # /select/<accountID>/prometheus.
+  - name: victoria-metrics-single
+    version: 0.45.0
+    repository: https://victoriametrics.github.io/helm-charts/
+
+  # Scrapes kube-state-metrics and the kubelets into the single-node store, and
+  # stamps the cluster / az / env external labels on what it collects. These are
+  # the two scrape jobs the OpenTelemetry Collector used to run; the collector
+  # keeps only the traces half.
+  - name: victoria-metrics-agent
+    version: 0.46.0
+    repository: https://victoriametrics.github.io/helm-charts/
+
+  # Basic-auth proxy in front of the single-node store's READ path. The routing
+  # table names the environment variables holding the pair, never the pair
+  # itself, so this is what exercises that half of the backend's configuration.
+  - name: victoria-metrics-auth
+    version: 0.40.0
+    repository: https://victoriametrics.github.io/helm-charts/
+
   # The topology source. Eleven collectors, 22 series — see values.yaml.
   - name: kube-state-metrics
     version: 8.4.0
     repository: https://prometheus-community.github.io/helm-charts
 
-  # Scrapes kube-state-metrics and the kubelets, turns demo traces into
-  # service-graph metrics, and stamps the cluster / az / env external labels
-  # that kube-state-metrics itself cannot produce.
+  # Turns the demo's OTLP traces into service-graph metrics, and stamps the
+  # cluster / az / env external labels on them. It scrapes nothing: both scrape
+  # jobs moved to vmagent when the estate was split across two stores.
   - name: opentelemetry-collector
     version: 0.170.0
     repository: https://open-telemetry.github.io/opentelemetry-helm-charts
