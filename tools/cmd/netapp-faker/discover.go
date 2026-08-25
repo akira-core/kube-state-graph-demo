@@ -48,6 +48,12 @@ func discover(ctx context.Context, client *http.Client, cfg config) ([]claim, er
 	if err != nil {
 		return nil, fmt.Errorf("build query: %w", err)
 	}
+	// The read endpoint may sit behind an auth proxy — in the demo it is vmauth
+	// in front of the single-node store, which is where the kube-state-metrics
+	// families live. Writes go somewhere else entirely and stay unauthenticated.
+	if cfg.SelectUser != "" {
+		req.SetBasicAuth(cfg.SelectUser, cfg.SelectPass)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("query vmselect: %w", err)

@@ -7,7 +7,39 @@
 # inside a subchart's values. Fixed names keep every one of those honest.
 
 # ---------------------------------------------------------------------------
-# VictoriaMetrics — the single store everything writes to and the backend reads.
+# Values every subchart sees. Two things live here because more than one
+# component has to agree on them exactly, and a copy in each block is a copy
+# that can drift.
+# ---------------------------------------------------------------------------
+global:
+  # The three labels kube-state-metrics cannot emit. TWO components stamp them
+  # now that the estate is split across two stores — vmagent on what it scrapes,
+  # the OpenTelemetry Collector on the service-graph series it derives — and
+  # every graph id is cluster-scoped while ?az= / ?env= are pushed to upstream
+  # PromQL as raw matchers. A value that differed between the two would silently
+  # drop half the graph out of any filtered request, so both read from here.
+  ksgExternalLabels:
+    cluster: ksg-demo
+    az: local-a
+    env: demo
+
+  # Demo-only credential for vmauth, which fronts the single-node store's read
+  # path. Three components must agree on it: vmauth itself, kube-state-graph's
+  # routing table, and netapp-faker's claim discovery. It is rendered into
+  # Secrets, never passed as an argument, and the routing table names only the
+  # environment VARIABLES — the backend rejects a routing file carrying a
+  # literal password outright.
+  ksgUpstreamAuth:
+    username: ksg
+    password: ksg-demo-not-a-real-secret
+
+# ---------------------------------------------------------------------------
+# VictoriaMetrics, store 1 of 2 — cluster flavour.
+#
+# Holds the NetApp Harvest series (netapp-faker writes them straight to
+# vminsert) and the service-graph series the collector derives from traces.
+# kube-state-metrics and kubelet series live in the single-node store below;
+# kube-state-graph's routing table is what puts the two halves back together.
 # ---------------------------------------------------------------------------
 victoria-metrics-cluster:
   fullnameOverride: vm
@@ -28,6 +60,157 @@ victoria-metrics-cluster:
     persistentVolume:
       # emptyDir: a restart losing the demo's metrics costs one scrape interval.
       enabled: false
+
+# ---------------------------------------------------------------------------
+# VictoriaMetrics, store 2 of 2 — single-node flavour.
+#
+# Holds everything vmagent scrapes: the kube-state-metrics families and the two
+# kubelet volume-stats series. Single-node rather than a second cluster install
+# on purpose — the two stores are meant to differ in SHAPE, not just in name.
+# This one serves the Prometheus API under /prometheus, where the cluster build
+# serves it under /select/<accountID>/prometheus, so a routing table that
+# quietly assumed one URL layout could not work here.
+#
+# Nothing reads it directly: vmauth below is its read path.
+# ---------------------------------------------------------------------------
+victoria-metrics-single:
+  server:
+    fullnameOverride: vm-single
+    # Two days, matching the cluster install. The graph is built over minutes.
+    retentionPeriod: 2d
+    persistentVolume:
+      # emptyDir, as in the cluster store: a restart losing the demo's metrics
+      # costs one scrape interval.
+      enabled: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# vmagent — the collection half of the split.
+#
+# These two scrape jobs used to run inside the OpenTelemetry Collector. They
+# moved here whole, node-proxy trick and metric filter included, because the
+# series they produce now belong to a different store than the collector's own
+# output. The collector keeps only what it alone can do: turning spans into
+# service-graph metrics.
+# ---------------------------------------------------------------------------
+victoria-metrics-agent:
+  fullnameOverride: vm-agent
+
+  remoteWrite:
+    - url: http://vm-single:8428/api/v1/write
+
+  rbac:
+    create: true
+    # The kubelet job reaches port 10250 through the API server's node proxy
+    # rather than directly, which needs the ServiceAccount token and nothing
+    # else — a direct scrape would need the kubelet's serving CA. The chart's
+    # own ClusterRole grants nodes and nodes/metrics but not nodes/proxy.
+    extraRules:
+      - apiGroups: ['']
+        resources:
+          - nodes/proxy
+        verbs: ['get', 'list', 'watch']
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+  config:
+    # The chart passes this config through `tpl` only when asked, and the three
+    # external labels below have to come from one place — see `global` at the
+    # top of this file.
+    useTpl: true
+
+    global:
+      scrape_interval: 15s
+      # Stamped on every scraped series. The collector stamps the same three
+      # onto the service-graph series, from the same source.
+      external_labels:
+        cluster: "{{ .Values.global.ksgExternalLabels.cluster }}"
+        az: "{{ .Values.global.ksgExternalLabels.az }}"
+        env: "{{ .Values.global.ksgExternalLabels.env }}"
+
+    # Replaces the chart's default job list wholesale. vmagent's own self-scrape
+    # goes with it: this demo reads none of its series, and an extra job is an
+    # extra thing to explain.
+    scrape_configs:
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ['ksm:8080']
+
+      # kubelet, reached through the API server's node proxy rather than port
+      # 10250 directly: the proxy needs only the ServiceAccount token, where a
+      # direct scrape would need the kubelet's serving CA.
+      - job_name: kubelet
+        scrape_interval: 30s
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        authorization:
+          type: Bearer
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+        metric_relabel_configs:
+          # The kubelet exposes hundreds of series; the graph reads two.
+          - source_labels: [__name__]
+            regex: kubelet_volume_stats_(used|capacity)_bytes
+            action: keep
+
+# ---------------------------------------------------------------------------
+# vmauth — basic auth in front of the single-node store's READ path.
+#
+# It exists so the demo exercises the half of kube-state-graph's routing table
+# that handles credentials: a backend names the environment VARIABLES holding
+# its pair, never the pair itself, and a variable that is unset or empty is a
+# load failure rather than a quiet fallback to no credentials.
+#
+# Reads only. vmagent writes to vm-single directly — authenticating the write
+# path would prove nothing about the backend.
+# ---------------------------------------------------------------------------
+victoria-metrics-auth:
+  fullnameOverride: vm-auth
+
+  # configRaw rather than config: it is passed through `tpl`, which is what lets
+  # the credential live once in `global` instead of once here and once in the
+  # Secret the backend and the faker read.
+  configRaw: |
+    users:
+      - username: {{ .Values.global.ksgUpstreamAuth.username | quote }}
+        password: {{ .Values.global.ksgUpstreamAuth.password | quote }}
+        # vmauth appends the request path to this prefix, so the backend asking
+        # for /api/v1/query_range lands on
+        # http://vm-single:8428/prometheus/api/v1/query_range.
+        url_prefix: "http://vm-single:8428/prometheus"
+
+  service:
+    type: NodePort
+    # Exposed on a kind extraPortMapping for the same reason vmselect is: when
+    # the graph disagrees with what you think the metrics say, you need to ask
+    # BOTH stores in raw PromQL. This one wants `curl -u`.
+    nodePort: 30427
+
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
 
 # ---------------------------------------------------------------------------
 # kube-state-metrics — the topology half of the graph.
@@ -139,34 +322,32 @@ kube-state-metrics:
 # ---------------------------------------------------------------------------
 # OpenTelemetry Collector — the piece that makes the other pieces joinable.
 #
-# Three jobs, none of which any other component can do:
-#   1. scrape kube-state-metrics and the kubelets into VictoriaMetrics;
-#   2. turn the demo's traces into traces_service_graph_* metrics carrying
+# Two jobs, neither of which any other component can do:
+#   1. turn the demo's traces into traces_service_graph_* metrics carrying
 #      client_k8s_pod_uid / server_k8s_pod_uid;
-#   3. stamp cluster / az / env, which kube-state-metrics cannot emit at all.
+#   2. stamp cluster / az / env on them, which no exporter here emits itself.
+#
+# It scrapes NOTHING. The kube-state-metrics and kubelet jobs moved to vmagent
+# when the estate was split across two stores, because the series they produce
+# belong to the other one.
 # ---------------------------------------------------------------------------
 opentelemetry-collector:
   fullnameOverride: otel-collector
   mode: deployment
   replicaCount: 1
 
-  # contrib, not core: the servicegraph connector, the prometheus receiver and
-  # the prometheusremotewrite exporter all live there.
+  # contrib, not core: the servicegraph connector and the prometheusremotewrite
+  # exporter both live there.
   image:
     repository: otel/opentelemetry-collector-contrib
   command:
     name: otelcol-contrib
 
-  # kubernetes_sd_configs role:node plus the API-server metrics proxy.
+  # No Kubernetes SD and no scrape targets left: the collector receives OTLP
+  # from the workloads and writes to VictoriaMetrics, and needs no API access
+  # for either. vmagent carries the node-proxy permissions now.
   clusterRole:
-    create: true
-    rules:
-      - apiGroups: ['']
-        resources:
-          - nodes
-          - nodes/proxy
-          - nodes/metrics
-        verbs: ['get', 'list', 'watch']
+    create: false
 
   # Trace intake is OTLP only; the demo has no Jaeger or Zipkin producers.
   ports:
@@ -183,44 +364,11 @@ opentelemetry-collector:
     limits:
       memory: 512Mi
 
+  # No `receivers:` override any more. The chart's own otlp receiver is all
+  # this collector needs: the two scrape jobs that used to sit here —
+  # kube-state-metrics and the kubelets — are vmagent's now, carried over
+  # verbatim in the victoria-metrics-agent block above.
   config:
-    receivers:
-      prometheus:
-        config:
-          scrape_configs:
-            - job_name: kube-state-metrics
-              scrape_interval: 15s
-              static_configs:
-                - targets: ['ksm:8080']
-
-            # kubelet, reached through the API server's node proxy rather than
-            # port 10250 directly: the proxy needs only the ServiceAccount
-            # token, where a direct scrape would need the kubelet's serving CA.
-            - job_name: kubelet
-              scrape_interval: 30s
-              scheme: https
-              tls_config:
-                ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-              authorization:
-                type: Bearer
-                credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-              kubernetes_sd_configs:
-                - role: node
-              relabel_configs:
-                - target_label: __address__
-                  replacement: kubernetes.default.svc:443
-                # $$1 survives the collector's own ${} expansion and reaches
-                # Prometheus relabelling as $1.
-                - source_labels: [__meta_kubernetes_node_name]
-                  regex: (.+)
-                  target_label: __metrics_path__
-                  replacement: /api/v1/nodes/$$1/proxy/metrics
-              metric_relabel_configs:
-                # The kubelet exposes hundreds of series; the graph reads two.
-                - source_labels: [__name__]
-                  regex: kubelet_volume_stats_(used|capacity)_bytes
-                  action: keep
-
     connectors:
       # Pairs each CLIENT span with the SERVER span it caused and emits the
       # RED triplet the backend joins by exact series identity.
@@ -276,9 +424,9 @@ opentelemetry-collector:
         metric_statements:
           - context: datapoint
             statements:
-              - set(attributes["cluster"], "ksg-demo")
-              - set(attributes["az"], "local-a")
-              - set(attributes["env"], "demo")
+              - set(attributes["cluster"], "{{ .Values.global.ksgExternalLabels.cluster }}")
+              - set(attributes["az"], "{{ .Values.global.ksgExternalLabels.az }}")
+              - set(attributes["env"], "{{ .Values.global.ksgExternalLabels.env }}")
 
     exporters:
       prometheus_remote_write:
@@ -303,7 +451,7 @@ opentelemetry-collector:
           processors: [memory_limiter, transform/pod-uid, batch]
           exporters: [service_graph]
         metrics:
-          receivers: [prometheus, service_graph]
+          receivers: [service_graph]
           processors: [memory_limiter, transform/servicegraph-names, transform/external-labels, batch]
           exporters: [prometheus_remote_write]
 
@@ -312,10 +460,62 @@ opentelemetry-collector:
 # ---------------------------------------------------------------------------
 kube-state-graph:
   fullnameOverride: kube-state-graph
-  # Tenant-scoped read path. The cluster build serves the Prometheus API under
-  # /select/<accountID>/prometheus, and the backend appends /api/v1/... to
-  # whatever base it is given.
+
+  # Still required, and still validated, but no longer where the queries go:
+  # `backends` below wins and the server says so at WARN. Kept pointed at the
+  # cluster store so removing the routing table is a one-line rollback to the
+  # single-upstream deployment this demo used to be.
   promURL: http://vm-vmselect:8481/select/0/prometheus
+
+  # The routing table. Every one of the ~40 PromQL queries a build issues is
+  # dispatched through it, by metric family.
+  #
+  # The split is by producer: what vmagent scrapes lands in the single-node
+  # store, what the collector and the faker write lands in the cluster store.
+  # That puts the two halves of the storage join in DIFFERENT stores —
+  # kube_persistentvolumeclaim_info here, volume_labels there — so a
+  # pvc-to-netapp-aggr edge in the rendered graph is proof the fan-out and the
+  # merge both work. `make wait` already gates on exactly that edge.
+  #
+  # `probe` is listed on BOTH: it is the up{} store-health family, it accepts no
+  # request-scoped matcher, and listing it twice is what makes /readyz ask both
+  # stores instead of declaring the estate healthy on the strength of one.
+  #
+  # No `zones` on either entry. Zone routing is real, but this demo stamps a
+  # single az value across the whole estate, so declaring zones here would be
+  # decoration that never selects anything.
+  backends:
+    - name: cluster-store
+      # Tenant-scoped read path. The cluster build serves the Prometheus API
+      # under /select/<accountID>/prometheus, and the backend appends
+      # /api/v1/... to whatever base it is given.
+      url: http://vm-vmselect:8481/select/0/prometheus
+      families: [harvest, servicegraph, probe]
+    - name: single-store
+      # Through vmauth, not to vm-single directly: the credential legs of the
+      # routing table are only exercised if something actually demands them.
+      # vmauth appends the request path to its own url_prefix, so no /prometheus
+      # here — see the victoria-metrics-auth block.
+      url: http://vm-auth:8427
+      families: [ksm, kubelet, probe]
+      # NAMES of environment variables, never values. A routing file carrying a
+      # literal password is rejected outright, and a variable named here but
+      # unset is a load failure rather than a quiet fallback to no credentials.
+      usernameEnv: KSG_UPSTREAM_USERNAME
+      passwordEnv: KSG_UPSTREAM_PASSWORD
+
+  extraEnv:
+    - name: KSG_UPSTREAM_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: ksg-upstream-auth
+          key: username
+    - name: KSG_UPSTREAM_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: ksg-upstream-auth
+          key: password
+
   azLabel: az
   envLabel: env
   service:
@@ -326,12 +526,18 @@ kube-state-graph:
 # netapp-faker — the one component that is not real.
 # ---------------------------------------------------------------------------
 netapp-faker:
-  vmSelectURL: http://vm-vmselect:8481/select/0/prometheus
+  # Discovery reads kube_persistentvolumeclaim_info, which is a kube-state-metrics
+  # family and therefore lives in the single-node store behind vmauth. Writes go
+  # to the cluster store, where the rest of the Harvest series live. The faker is
+  # the one component that reads from one store and writes to the other.
+  vmSelectURL: http://vm-auth:8427
+  vmSelectAuthSecret: ksg-upstream-auth
   vmInsertURL: http://vm-vminsert:8480/insert/0/prometheus
   storageClass: netapp-nas
-  extraLabels:
-    az: local-a
-    env: demo
+  # az / env are seeded from global.ksgExternalLabels — the faker is the third
+  # component stamping them and all three have to agree exactly. Add a key here
+  # only to override one of them for this component alone.
+  extraLabels: {}
 
 # ---------------------------------------------------------------------------
 # In-cluster NFS server — one Ganesha export. csi-driver-nfs provisions a

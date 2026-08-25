@@ -1,0 +1,40 @@
+{{- $ctx := dict "helm" . }}
+{{- $fullname := include "vm.plain.fullname" $ctx }}
+{{- $ns := include "vm.namespace" $ctx }}
+{{- if and (empty .Values.configMap) .Values.config }}
+  {{- $cfg := deepCopy .Values.config }}
+  {{- if .Values.extraScrapeConfigs }}
+    {{- $_ := set $cfg "scrape_configs" (concat (.Values.config.scrape_configs | default list) .Values.extraScrapeConfigs) }}
+  {{- end }}
+  {{- $data := toYaml (omit $cfg "useTpl") }}
+  {{- if $cfg.useTpl }}
+    {{- $data = tpl $data . }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vmagent.scrape.config.name" $ctx }}
+  namespace: {{ $ns }}
+  labels: {{ include "vm.labels" $ctx | nindent 4 }}
+data:
+  scrape.yml: |{{ $data | nindent 4 }}
+{{- end }}
+{{- $rwcm := dict }}
+{{- range $i, $rw := .Values.remoteWrite }}
+  {{- range $rwKey, $rwValue := $rw }}
+    {{- if or (kindIs "slice" $rwValue) (kindIs "map" $rwValue) }}
+      {{- $_ := set $rwcm (printf "%d-%s.yaml" $i $rwKey) (toYaml $rwValue) }}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- with (include "vmagent.rw.config" .) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-rw
+  namespace: {{ $ns }}
+  labels: {{ include "vm.labels" $ctx | nindent 4 }}
+data: {{ . | nindent 2 }}
+{{- end }}

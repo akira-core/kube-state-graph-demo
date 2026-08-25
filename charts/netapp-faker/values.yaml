@@ -8,9 +8,19 @@ image:
 
 replicaCount: 1
 
-# REQUIRED. Reads (discovery) go to vmselect, writes (import) to vminsert.
+# REQUIRED. Reads (discovery) go to a Prometheus-compatible read endpoint,
+# writes (import) to vminsert. The two need not be the same installation: the
+# faker discovers claims from the kube-state-metrics series and writes Harvest
+# series, and those two families may well be stored apart.
 vmSelectURL: ''
 vmInsertURL: ''
+
+# Optional. Name of an existing Secret holding `username` / `password` keys for
+# basic auth against vmSelectURL. Unset means an unauthenticated read endpoint.
+# There is deliberately no plaintext credential value here: a password in values
+# ends up in the release's stored manifest, readable by anything that can read
+# the release Secret.
+vmSelectAuthSecret: ''
 
 # Only claims on this StorageClass get a fake NetApp backend. Everything else
 # keeps a bare PVC node, which is the point: the demo shows both the joined and

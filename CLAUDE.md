@@ -73,18 +73,21 @@ Host requirements: `docker`, `kind`, `kubectl`, `helm`, `jq`, `curl`, `git`. Go 
 Node are **not** needed — both builds run inside Docker.
 
 Entry points: Grafana <http://localhost:3001> (anonymous Admin), Graph API
-<http://localhost:18080/docs>, vmselect <http://localhost:18481/select/0/prometheus>.
+<http://localhost:18080/docs>, and **two** metric stores — vmselect
+<http://localhost:18481/select/0/prometheus> (Harvest, service-graph) and vmauth
+<http://localhost:18427> (kube-state-metrics, kubelet; needs
+`curl -u ksg:ksg-demo-not-a-real-secret`).
 Grafana is on 3001 so this can run beside the panel repo's own docker-compose demo.
 
 ## Where things live
 
 | Path | Holds |
 |---|---|
-| `charts/ksg-demo/values.yaml` | the whole pipeline: VM, kube-state-metrics, OTel Collector, backend, faker, Grafana. Most changes land here |
+| `charts/ksg-demo/values.yaml` | the whole pipeline: both VM stores, vmagent, vmauth, kube-state-metrics, OTel Collector, backend, faker, Grafana. Most changes land here. Its `global` block holds the two things more than one component must agree on: the cluster/az/env external labels and the vmauth credential |
 | `charts/demo-workloads/values.yaml` | the estate the graph is a picture of — 7 workloads across `shop` / `platform` |
 | `charts/kube-state-graph/`, `charts/netapp-faker/`, `charts/nfs-server/` | local charts for the three first-party deployments. `nfs-server` is one Ganesha process exporting a single directory — no upstream chart exports a writable share without also being a provisioner, and a provisioner's Ganesha only exports directories it created for its own PVs |
 | `tools/cmd/demo-app` | one binary playing every workload role; role is entirely env config |
-| `tools/cmd/netapp-faker` | the only fake component — discovers PVCs from vmselect, renders ONTAP series |
+| `tools/cmd/netapp-faker` | the only fake component — discovers PVCs from the store holding the ksm families (through vmauth, so it carries basic auth), renders ONTAP series into the other store |
 | `scripts/verify.sh` | one check per pipeline precondition, in data-flow order |
 | `scripts/charts-deps.sh` | offline dependency materialisation, run by `make deps` |
 | `kind/cluster.yaml` | 3 nodes (zone labels so `kube_node_labels` carries something), host port maps |
@@ -92,8 +95,23 @@ Grafana is on 3001 so this can run beside the panel repo's own docker-compose de
 ## Architecture notes that are not obvious from one file
 
 **The graph is built from PromQL, never from the Kubernetes API.** A demo therefore
-has to produce *metrics*, not objects. This is why the OTel Collector is
+has to produce *metrics*, not objects. This is why the collection path is
 load-bearing and why every "fix" below is a metric-shape fix.
+
+**The metrics live in TWO stores and the backend assembles one graph from
+both.** The split is by producer, declared in `kube-state-graph.backends`:
+
+| Store | Families | Written by | Read path |
+|---|---|---|---|
+| `vm` (VictoriaMetrics cluster) | `harvest`, `servicegraph`, `probe` | netapp-faker, OTel Collector | `vm-vmselect`, unauthenticated |
+| `vm-single` (VictoriaMetrics single) | `ksm`, `kubelet`, `probe` | vmagent | `vm-auth`, basic auth |
+
+This is not decoration: it puts the two halves of the storage join
+(`kube_persistentvolumeclaim_info` and `volume_labels`) in different stores, so
+no PromQL can join them and a `pvc-to-netapp-aggr` edge is proof the fan-out and
+merge work. `probe` is on both so `/readyz` asks both. Deleting the `backends`
+list is a complete rollback: `--prom-url` still names the cluster store and the
+backend falls back to one implicit backend serving every family.
 
 **One image, many roles.** All seven demo workloads run `ksg-demo/tools:local`.
 What a workload *is* — gateway, mid-tier, storage leaf, load generator — is
@@ -141,9 +159,31 @@ reports the vendored set as stale.
 Nothing in this pipeline errors when a label is missing — the edge just disappears.
 Before changing any of these, know what it removes:
 
-- **`transform/external-labels` must reach every metric family**, kubelet and
-  service-graph included. Every graph id is cluster-scoped and `?az=` / `?env=` are
-  pushed to upstream PromQL as raw matchers; a family missing them matches nothing.
+- **The cluster / az / env external labels have THREE stampers and all three
+  must agree exactly.** vmagent's `global.external_labels` covers what it scrapes
+  (`ksm`, `kubelet`), the collector's `transform/external-labels` covers the
+  service-graph series, and netapp-faker's `EXTRA_LABELS` covers the Harvest
+  series (az / env only — Harvest carries no `cluster`). Every graph id is
+  cluster-scoped and `?az=` / `?env=` are pushed to upstream PromQL as raw
+  matchers, so a family whose value differs matches nothing and vanishes from any
+  filtered request — silently. All three read `global.ksgExternalLabels` in
+  `charts/ksg-demo/values.yaml`; keep it that way rather than restating a value.
+- **The collector scrapes nothing.** Its `clusterRole.create` is `false` and its
+  metrics pipeline receives only the `service_graph` connector. Re-adding a
+  `prometheus` receiver here would write ksm or kubelet series into the *cluster*
+  store, where the routing table does not look for them — the series would exist,
+  be scraped, cost cardinality, and never reach the graph.
+- **The routing table must cover all five families.** A family served by no
+  backend is a validation error at startup, not a degrade, because the empty
+  vector it would produce is indistinguishable from an estate that holds nothing.
+  `probe` is listed on both entries deliberately: drop it from one and `/readyz`
+  starts calling the estate healthy while that store is down.
+- **`usernameEnv` / `passwordEnv` name variables, never values.** The routing
+  file is a ConfigMap; the backend rejects a literal `username`/`password` field,
+  rejects a half-declared pair, and treats a named-but-unset variable as a load
+  failure rather than falling back to no credentials. The demo credential lives
+  once in `global.ksgUpstreamAuth` and reaches vmauth, the backend and the faker
+  from there.
 - **`translation_strategy: UnderscoreEscapingWithoutSuffixes`** stops
   `traces_service_graph_request_total` becoming `..._total_total`. The cost is the
   latency histogram losing its `_seconds`, which `transform/servicegraph-names`
@@ -195,8 +235,13 @@ Before changing any of these, know what it removes:
   is the prune, not a broken pipeline.
 - **The storage join is exactly one equality**:
   `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name`.
-  Nothing else. `netapp-faker` discovers claims from vmselect each tick and writes
-  the PV name Kubernetes actually assigned.
+  Nothing else. `netapp-faker` discovers claims each tick and writes the PV name
+  Kubernetes actually assigned. Its two sides now live in DIFFERENT stores — the
+  claim in `vm-single`, the volume in `vm` — so no PromQL can perform this join
+  and only the backend's fan-out can. That is why `verify.sh` proves the two
+  halves separately and then asserts the `pvc-to-netapp-aggr` edge, instead of
+  the single-store PromQL join it used to run. It also means the faker itself
+  reads one store and writes the other, which is why it carries basic auth.
 
 ## Deliberate negative cases — do not "fix" them
 
@@ -231,5 +276,14 @@ A demo where everything is green teaches nothing. These are intentional:
    scrape job, so that whole job contributes nothing until it settles. Gating on
    the join alone let `make up` return two minutes early and `make verify` fail
    three checks that were merely not-yet.
-3. Cross-check with raw PromQL at the vmselect URL when the graph disagrees with
-   what you think the metrics say.
+3. Cross-check with raw PromQL when the graph disagrees with what you think the
+   metrics say — and ask the RIGHT store. `kube_*` and `kubelet_*` are at
+   <http://localhost:18427> behind basic auth; `volume_labels`, the `qos_*` /
+   `aggr_*` families and `traces_service_graph_*` are at
+   <http://localhost:18481/select/0/prometheus>. A query sent to the wrong one
+   returns an empty result that looks exactly like a broken pipeline, which is
+   why every `verify.sh` section header names its store.
+4. `kube_state_graph_backend_query_failures_total{backend}` on the backend's
+   `/metrics` is cumulative since process start, and a cold bring-up always puts
+   tens of connection-refused errors in it: the server is ready before either
+   store is. Read it as a delta across one build, as `verify.sh` does.

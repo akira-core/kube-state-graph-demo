@@ -1,0 +1,17 @@
+{{- if .Values.backends }}
+# The upstream routing table, mounted rather than passed as arguments so it can
+# be edited and picked up without a restart.
+#
+# A ConfigMap, never a Secret: the server rejects a routing file carrying a
+# literal `username` or `password` field, and a backend needing credentials
+# names the environment variables holding them instead.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-state-graph.fullname" . }}-backends
+  labels:
+    {{- include "kube-state-graph.labels" . | nindent 4 }}
+data:
+  backends.yaml: |
+    {{- toYaml (dict "backends" .Values.backends) | nindent 4 }}
+{{- end }}

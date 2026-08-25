@@ -34,15 +34,15 @@ doing real work:
 | Real | Faked |
 |---|---|
 | Pods, Services, EndpointSlices, PVCs — actual Kubernetes objects on a 3-node kind cluster | The **NetApp ONTAP array**: aggregates, controllers, FlexVol topology and QoS I/O |
-| kube-state-metrics, scraped for the topology series the graph reads | |
+| kube-state-metrics, scraped by vmagent for the topology series the graph reads | |
 | Real kubelet volume stats for claims on `netapp-nas` (CSI NFS `NodeGetVolumeStats`) | |
 | Real HTTP calls between workloads, traced with OpenTelemetry | |
 | The service-graph metrics, derived from those traces by the collector | |
 
 There is exactly one component whose data is invented — `netapp-faker` — because
 a laptop cannot run an ONTAP array. Even that one **discovers rather than
-fixtures**: every tick it asks VictoriaMetrics which claims exist on the demo
-StorageClass and renders a storage chain behind the `pvc-<uuid>` PV names
+fixtures**: every tick it asks the store holding the kube-state-metrics series
+which claims exist on the demo StorageClass and renders a storage chain behind the `pvc-<uuid>` PV names
 Kubernetes actually assigned. Create a PVC and its aggregate, controller and I/O
 appear within one tick.
 
@@ -56,41 +56,91 @@ appear within one tick.
 │                    └→ orders ──┬→ mongodb        │                           │
 │                                └→ nats           ▼                           │
 │                                          ┌───────────────┐                   │
-│  kube-state-metrics ────── scrape ──────▶│ OTel Collector│                   │
-│  kubelet          ──────── scrape ──────▶│               │                   │
-└──────────────────────────┘               │  servicegraph │                   │
-                                           │  connector    │                   │
-   netapp-faker ──── import ──┐            │  + cluster/az │                   │
-                              ▼            │    /env stamp │                   │
-                        ┌──────────────────┴───────────────┐                   │
-                        │      VictoriaMetrics (cluster)   │                   │
-                        │  vminsert → vmstorage → vmselect │                   │
-                        └──────────────┬───────────────────┘                   │
-                                       │ PromQL                                │
-                              ┌────────▼─────────┐                             │
-                              │ kube-state-graph │                             │
-                              └────────┬─────────┘                             │
-                                       │ /v1/graph (Cytoscape JSON)            │
-                              ┌────────▼─────────┐                             │
-                              │ Grafana + Infinity datasource + KSG panel      │
-                              └────────────────────────────────────────────────┘
+│  kube-state-metrics ──┐                  │ OTel Collector│                   │
+│  kubelet          ──┐ │                  │  servicegraph │                   │
+└─────────────────────┼─┼──┐               │  connector    │                   │
+                      │ │  │               │  + cluster/az │  netapp-faker     │
+                 scrape │  │               │    /env stamp │       │ import    │
+                      ▼ ▼  │               └───────┬───────┘       │           │
+              ┌───────────┐│                       │               │           │
+              │  vmagent  ││                       ▼               ▼           │
+              │ + stamp   ││          ┌──────────────────────────────────┐     │
+              └─────┬─────┘│          │   store 1: VictoriaMetrics       │     │
+                    ▼      │          │   cluster — vminsert → vmstorage │     │
+        ┌──────────────────┴───┐      │             → vmselect           │     │
+        │ store 2: vmsingle    │      │   harvest, servicegraph          │     │
+        │ ksm, kubelet         │      └──────────────┬───────────────────┘     │
+        └───────┬──────────────┘                     │                         │
+                ▼ (basic auth)                       │                         │
+        ┌───────────────┐                            │                         │
+        │    vmauth     │◀── discovery ── netapp-faker                          │
+        └───────┬───────┘                            │                         │
+                │           PromQL, routed by family │                         │
+                └──────────────┬─────────────────────┘                         │
+                      ┌────────▼─────────┐                                     │
+                      │ kube-state-graph │  backends.yaml routing table        │
+                      └────────┬─────────┘                                     │
+                               │ /v1/graph (Cytoscape JSON)                    │
+                      ┌────────▼─────────┐                                     │
+                      │ Grafana + Infinity datasource + KSG panel              │
+                      └────────────────────────────────────────────────────────┘
 ```
+
+### Two stores, one graph
+
+The metrics live in **two** Prometheus-compatible installations, and
+kube-state-graph assembles one graph from both. The split is by producer:
+
+| Store | Query families | Written by | Read path |
+|---|---|---|---|
+| VictoriaMetrics **cluster** | `harvest`, `servicegraph` | netapp-faker (import), OTel Collector (remote-write) | vmselect, unauthenticated |
+| VictoriaMetrics **single** | `ksm`, `kubelet` | vmagent | vmauth, basic auth |
+
+The `probe` family (`up{}`) is served by both, so `/readyz` asks both stores
+rather than calling the estate healthy on the strength of one.
+
+This is not decoration. It puts the two halves of the storage join in different
+stores — `kube_persistentvolumeclaim_info` in one, `volume_labels` in the
+other — so **no PromQL can join them**. A `pvc-to-netapp-aggr` edge in the
+rendered graph is therefore proof that the backend's fan-out and merge both
+work, and `make wait` already gates on exactly that edge.
+
+The single-node store also serves the Prometheus API under `/prometheus` where
+the cluster build serves it under `/select/<accountID>/prometheus`, so the two
+differ in shape and not only in name.
+
+The routing table lives in `charts/ksg-demo/values.yaml` under
+`kube-state-graph.backends`, is rendered into a ConfigMap, and is re-read every
+30s without a restart. Removing it is a complete rollback to the single-upstream
+deployment: `--prom-url` still points at the cluster store, and the backend
+falls back to one implicit backend serving every family.
+
+Credentials are the one thing the routing file never carries. It names the
+environment *variables* (`usernameEnv` / `passwordEnv`); a literal password in
+the file is rejected, and a variable named there but unset is a load failure
+rather than a quiet fallback to no credentials.
 
 ### Why the OpenTelemetry Collector is load-bearing
 
-It does three jobs no other component can:
+It does two jobs no other component can:
 
-1. **Scrapes** kube-state-metrics and the kubelets into VictoriaMetrics.
-2. **Turns traces into service-graph metrics.** Its `servicegraph` connector
+1. **Turns traces into service-graph metrics.** Its `servicegraph` connector
    pairs each CLIENT span with the SERVER span it caused and emits
    `traces_service_graph_request_*` carrying `client_k8s_pod_uid` /
    `server_k8s_pod_uid` — the only thing that lets the backend resolve a call
    edge to a *pod* rather than to an anonymous `external` node. The pod UID
    reaches the span via the downward API (`OTEL_RESOURCE_ATTRIBUTES`).
-3. **Stamps `cluster`, `az` and `env`.** kube-state-metrics emits none of
-   these, yet every graph id is cluster-scoped and the `?az=` / `?env=` request
-   filters are pushed to upstream PromQL as raw label matchers. A family missing
-   them does not error — it silently matches nothing.
+2. **Stamps `cluster`, `az` and `env` on them.** No exporter here emits these,
+   yet every graph id is cluster-scoped and the `?az=` / `?env=` request filters
+   are pushed to upstream PromQL as raw label matchers. A family missing them
+   does not error — it silently matches nothing.
+
+It scrapes **nothing**. The kube-state-metrics and kubelet jobs are vmagent's,
+because the series they produce belong to the other store. vmagent stamps the
+same three labels on what it collects, and both read them from one place —
+`global.ksgExternalLabels` in `charts/ksg-demo/values.yaml` — because a value
+that differed between the two would silently drop half the graph out of any
+filtered request.
 
 ### Every edge type the backend can produce
 
@@ -165,7 +215,10 @@ charts/ksg-demo/charts/
   grafana/                   10.5.15    ── vendored, tracked
   kube-state-metrics/        8.4.0      ── vendored, tracked
   opentelemetry-collector/   0.170.0    ── vendored, tracked
-  victoria-metrics-cluster/  0.49.0     ── vendored, tracked
+  victoria-metrics-cluster/  0.49.0     ── vendored, tracked   store 1
+  victoria-metrics-single/   0.45.0     ── vendored, tracked   store 2
+  victoria-metrics-agent/    0.46.0     ── vendored, tracked   scrapes into store 2
+  victoria-metrics-auth/     0.40.0     ── vendored, tracked   store 2's read path
   csi-driver-nfs/            4.13.4     ── vendored, tracked
   *.tgz                                 ── first-party charts, rebuilt by make deps
 ```
@@ -227,7 +280,8 @@ from inside a subchart's values.
 |---|---|---|
 | Grafana | <http://localhost:3001> | anonymous Admin; dashboards in the `kube-state-graph` folder |
 | Graph API | <http://localhost:18080/docs> | Scalar UI over the OpenAPI spec |
-| VictoriaMetrics | <http://localhost:18481/select/0/prometheus> | vmselect, for checking with raw PromQL |
+| VM cluster store | <http://localhost:18481/select/0/prometheus> | vmselect — Harvest and service-graph series, in raw PromQL |
+| VM single store | <http://localhost:18427> | vmauth — kube-state-metrics and kubelet series. Needs `curl -u ksg:ksg-demo-not-a-real-secret` |
 
 Grafana is on **3001**, not the usual 3000, so this can run beside the panel
 repo's own `docker-compose` demo.
@@ -251,12 +305,25 @@ each precondition in the order the data flows and names what breaks when it is
 missing:
 
 ```
-== 3. non-default kube-state-metrics allowlists ==
-   ok   endpointslice -> service join                  15 series
-   ok   service ArgoCD annotation                      6 series
-   ok   deployment ArgoCD annotation                   5 series
-   ok   statefulset ArgoCD annotation                  2 series
+== 7. the split is real, and the join spans it ==
+   ok   volume_name joins a real PV across stores      3 PV names in both stores
+   ok   cluster store holds no kube_pod_info           0 series
+   ok   single store holds no volume_labels            0 series
+   ok   vmauth rejects an unauthenticated read         HTTP 401
+
+== 8. upstream backend routing ==
+   ok   routing table has both backends                kube_state_graph_upstream_backends = 2
+   ok   backend cluster-store failures during one build 0 new (15 lifetime)
+   ok   backend single-store failures during one build 0 new (38 lifetime)
+   ok   /readyz — every backend answered               HTTP 200
 ```
+
+Because the demo now spans two stores, every check names the one it asks: a
+query sent to the wrong store returns an empty result that looks exactly like a
+broken pipeline. The per-backend failure counters are read as a **delta across
+one graph build** rather than as absolutes — they are cumulative since process
+start, and a cold bring-up reliably puts tens of connection-refused errors in
+them because the server is ready before either store is.
 
 The graph is also empty for a mundane reason for the first minute or so: the
 backend builds over the requested window, and nothing has been scraped yet.
@@ -268,8 +335,12 @@ backend builds over the requested window, and nothing has been scraped yet.
 | Panel says "Datasource ksg-default was not found" | Grafana is still installing the Infinity plugin (needs network on first start) |
 | Graph has pods but no call edges | `make logs-collector`; check `client_k8s_pod_uid` in `make verify` |
 | Call edges end in `external` nodes | the pod UID is not reaching the spans — check `OTEL_RESOURCE_ATTRIBUTES` on a workload |
-| No storage half at all | `make logs-faker`; the join is `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name` and nothing else |
+| No pods or nodes at all | `kubectl logs deployment/vm-agent` — nothing is scraping into the single-node store |
+| No storage half at all | `make logs-faker`; the join is `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name` and nothing else, and its two halves are in different stores |
 | Edges have no `p90ServerMs` | the collector's `transform/servicegraph-names` — with metric suffixes off, the histogram loses its `_seconds` and must have it put back |
+| `/readyz` is 503 naming a backend | that store is down or unreachable; the body names the backend, never its URL |
+| Everything filtered by `?az=` is empty | vmagent's `external_labels` and the collector's `transform/external-labels` disagree — both must come from `global.ksgExternalLabels` |
+| Backend logs "upstream backends did not answer" right after `make up` | expected: the server is ready before either store is, and it retries |
 
 ## Requirements
 

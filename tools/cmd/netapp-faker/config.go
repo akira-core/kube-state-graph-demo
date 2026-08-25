@@ -11,7 +11,9 @@ import (
 // config drives the fake ONTAP estate. Everything except the endpoints has a
 // working default so the chart only has to wire the two VictoriaMetrics URLs.
 type config struct {
-	SelectURL    string        // vmselect Prometheus API base, e.g. http://vmselect:8481/select/0/prometheus
+	SelectURL    string        // read endpoint's Prometheus API base, e.g. http://vmselect:8481/select/0/prometheus
+	SelectUser   string        // basic-auth user for SelectURL; empty means unauthenticated
+	SelectPass   string        // basic-auth password for SelectURL
 	InsertURL    string        // vminsert Prometheus API base, e.g. http://vminsert:8480/insert/0/prometheus
 	StorageClass string        // only claims on this StorageClass get a fake backend
 	OntapCluster string        // ONTAP cluster name — NOT a Kubernetes cluster
@@ -24,6 +26,8 @@ type config struct {
 func loadConfig() (config, error) {
 	cfg := config{
 		SelectURL:    strings.TrimRight(os.Getenv("VM_SELECT_URL"), "/"),
+		SelectUser:   os.Getenv("VM_SELECT_USERNAME"),
+		SelectPass:   os.Getenv("VM_SELECT_PASSWORD"),
 		InsertURL:    strings.TrimRight(os.Getenv("VM_INSERT_URL"), "/"),
 		StorageClass: envStr("STORAGE_CLASS", "netapp-nas"),
 		OntapCluster: envStr("ONTAP_CLUSTER", "ontap-lab"),
@@ -33,6 +37,12 @@ func loadConfig() (config, error) {
 	}
 	if cfg.SelectURL == "" || cfg.InsertURL == "" {
 		return cfg, fmt.Errorf("VM_SELECT_URL and VM_INSERT_URL are both required")
+	}
+	// Half a pair is a typo, not a configuration. Accepting it would send
+	// unauthenticated reads at an endpoint that answers 401, and the faker would
+	// report a discovery failure that names the wrong cause.
+	if (cfg.SelectUser == "") != (cfg.SelectPass == "") {
+		return cfg, fmt.Errorf("VM_SELECT_USERNAME and VM_SELECT_PASSWORD must be set together or not at all")
 	}
 
 	var err error

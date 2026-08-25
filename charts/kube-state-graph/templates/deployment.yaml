@@ -34,9 +34,22 @@ spec:
             - --log-level={{ .Values.logLevel }}
             - --az-label={{ .Values.azLabel }}
             - --env-label={{ .Values.envLabel }}
+          {{- if .Values.backends }}
+            # With a routing table the file wins over --prom-url and the server
+            # says so at WARN. Removing `backends` from values is therefore a
+            # complete rollback to the single-upstream deployment.
+            - --backends-file=/etc/kube-state-graph/backends.yaml
+            - --backends-reload-interval={{ .Values.backendsReloadInterval }}
+          {{- end }}
           {{- with .Values.extraEnv }}
           env:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.backends }}
+          volumeMounts:
+            - name: backends
+              mountPath: /etc/kube-state-graph
+              readOnly: true
           {{- end }}
           ports:
             - name: http
@@ -64,6 +77,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      {{- if .Values.backends }}
+      volumes:
+        - name: backends
+          configMap:
+            # Deliberately no checksum annotation on the pod template: the point
+            # of the reload interval is that editing this ConfigMap re-routes a
+            # running server, and a checksum would restart the pod instead.
+            name: {{ include "kube-state-graph.fullname" . }}-backends
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         # Numeric, not the image's `nonroot` name: with runAsNonRoot set and

@@ -17,9 +17,37 @@ replicaCount: 1
 nameOverride: ''
 fullnameOverride: ''
 
-# REQUIRED. Point at vmselect's Prometheus API base, including the tenant path
+# REQUIRED even when `backends` below is set — the server validates it either
+# way. Point at a Prometheus API base, including the tenant path if there is one
 # (VictoriaMetrics cluster serves reads under /select/<accountID>/prometheus).
 promURL: ''
+
+# Optional upstream routing table. Empty means one implicit backend at promURL
+# serving every query family, which is byte-for-byte the pre-routing behaviour.
+#
+# Each entry:
+#   name         unique; appears in logs, in the per-backend failure metric, on
+#                query spans, and in the /readyz failure body. Also the merge
+#                order key — backends contribute in ascending name order.
+#   url          absolute http/https query endpoint
+#   families     non-empty subset of: ksm, kubelet, harvest, servicegraph, probe.
+#                A family served by NO backend is a validation error, not a
+#                degrade: its queries would have nowhere to go and the empty
+#                vector that produced is indistinguishable from an estate that
+#                genuinely holds nothing.
+#   zones        optional; the `az` values this backend holds. Omitted means
+#                every zone. Only ksm / kubelet / harvest are zone-routed —
+#                servicegraph and probe accept no az dimension, so an az-scoped
+#                request still reaches every backend serving them.
+#   usernameEnv  optional; NAME of the env var holding this backend's basic-auth
+#   passwordEnv  user / password. Never the value: the file is a ConfigMap. Both
+#                or neither, and a named-but-unset variable fails the load.
+backends: []
+
+# How often the routing table is re-read. 0 disables reloading. A file that
+# fails to parse or validate is rejected wholesale and the previous table keeps
+# serving; an invalid file at startup is fatal instead.
+backendsReloadInterval: 30s
 
 listenAddr: ':8080'
 logLevel: info
