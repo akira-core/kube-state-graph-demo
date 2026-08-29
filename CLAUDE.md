@@ -19,12 +19,12 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-panel/` are git submodules pinned to
-**feature branches**, not `main`:
+`kube-state-graph/` and `kube-state-graph-panel/` are git submodules. The
+backend tracks `main`; the panel is still on a feature branch:
 
 | Submodule | Tracked branch |
 |---|---|
-| `kube-state-graph` | `replace-storageclass-with-netapp-nodes` |
+| `kube-state-graph` | `main` |
 | `kube-state-graph-panel` | `node-group-compound-parent` |
 
 Each has its own `CLAUDE.md` with its own conventions — read the relevant one
@@ -163,11 +163,15 @@ Before changing any of these, know what it removes:
   must agree exactly.** vmagent's `global.external_labels` covers what it scrapes
   (`ksm`, `kubelet`), the collector's `transform/external-labels` covers the
   service-graph series, and netapp-faker's `EXTRA_LABELS` covers the Harvest
-  series (az / env only — Harvest carries no `cluster`). Every graph id is
-  cluster-scoped and `?az=` / `?env=` are pushed to upstream PromQL as raw
-  matchers, so a family whose value differs matches nothing and vanishes from any
-  filtered request — silently. All three read `global.ksgExternalLabels` in
-  `charts/ksg-demo/values.yaml`; keep it that way rather than restating a value.
+  series (az / env only — Harvest carries no Kubernetes `cluster`). The backend
+  composes a cluster **identity** `<az>-<env>-<cluster>` (demo:
+  `local-a-demo-ksg-demo`) as every id prefix, `labels.cluster`, and
+  `clusters[]`. `?cluster=` still takes the **raw** name (`ksg-demo`); feeding
+  `clusters[]` back as `?cluster=` returns an empty 200. A stamper whose value
+  differs does not error — it silently splits the estate into two identities
+  (or drops a family from any `?az=` / `?env=` filter). All three read
+  `global.ksgExternalLabels` in `charts/ksg-demo/values.yaml`; keep it that
+  way rather than restating a value.
 - **The collector scrapes nothing.** Its `clusterRole.create` is `false` and its
   metrics pipeline receives only the `service_graph` connector. Re-adding a
   `prometheus` receiver here would write ksm or kubelet series into the *cluster*
@@ -182,8 +186,8 @@ Before changing any of these, know what it removes:
   file is a ConfigMap; the backend rejects a literal `username`/`password` field,
   rejects a half-declared pair, and treats a named-but-unset variable as a load
   failure rather than falling back to no credentials. The demo credential lives
-  once in `global.ksgUpstreamAuth` and reaches vmauth, the backend and the faker
-  from there.
+  once in `global.ksgUpstreamAuth` and reaches vmauth, the backend, the faker
+  and Grafana's KSM datasource from there.
 - **`translation_strategy: UnderscoreEscapingWithoutSuffixes`** stops
   `traces_service_graph_request_total` becoming `..._total_total`. The cost is the
   latency histogram losing its `_seconds`, which `transform/servicegraph-names`
@@ -225,8 +229,12 @@ Before changing any of these, know what it removes:
   catch. A *withdrawn parameter* is the same failure one layer in and harder to
   see: the backend ignores unknown parameters without error, so the control
   populates, accepts a selection, and moves nothing. `?name=` was exactly that and
-  the control is gone. `cluster` / `env` / `namespace` are sourced from
-  `kube_pod_info`, not from the graph API.
+  the control is gone. `cluster` / `az` / `env` / `namespace` are sourced from
+  `kube_pod_info` on the **single-node store** (Grafana datasource
+  `victoriametrics-ksm` → vmauth), never from the graph API's `clusters[]`
+  (those are composed identities, not valid `?cluster=` values) and never from
+  the cluster-store Prometheus datasource (`victoriametrics` → vmselect), which
+  holds no `kube_pod_info`.
 - **The dashboard's `Projection` control is the backend's `?prune=`.** Its default,
   `Traffic graph` (`prune=true`), draws only workload sitting on a connectivity
   edge — 8 of the demo's 38 pods. `scripts/verify.sh` and `scripts/wait-ready.sh`

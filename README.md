@@ -131,16 +131,18 @@ It does two jobs no other component can:
    edge to a *pod* rather than to an anonymous `external` node. The pod UID
    reaches the span via the downward API (`OTEL_RESOURCE_ATTRIBUTES`).
 2. **Stamps `cluster`, `az` and `env` on them.** No exporter here emits these,
-   yet every graph id is cluster-scoped and the `?az=` / `?env=` request filters
-   are pushed to upstream PromQL as raw label matchers. A family missing them
-   does not error — it silently matches nothing.
+   yet every graph id is cluster-scoped as the composed identity
+   `<az>-<env>-<cluster>` (the demo renders `local-a-demo-ksg-demo`) and the
+   `?az=` / `?env=` / `?cluster=` request filters are pushed to upstream PromQL
+   as raw label matchers. A family missing them does not error — it silently
+   matches nothing, or composes a second identity if only the pair disagrees.
 
 It scrapes **nothing**. The kube-state-metrics and kubelet jobs are vmagent's,
 because the series they produce belong to the other store. vmagent stamps the
 same three labels on what it collects, and both read them from one place —
 `global.ksgExternalLabels` in `charts/ksg-demo/values.yaml` — because a value
-that differed between the two would silently drop half the graph out of any
-filtered request.
+that differed between the two would silently split the graph into two cluster
+identities (or drop half of it out of any filtered request).
 
 ### Every edge type the backend can produce
 
@@ -290,12 +292,16 @@ One dashboard is provisioned, authored in this repository at
 `charts/ksg-demo/dashboards/ksg-demo.json`. Bring-up does not copy from the
 panel submodule: that tree deleted the backend-backed dashboard and now
 ships only a generated fixture, so a sync could only destroy the demo's
-copy. `cluster`, `env` and `namespace` filters are `kube_pod_info` label
-queries through VictoriaMetrics; `edge_type` calls the backend. `Projection`
-switches the backend's `?prune=`: **Traffic graph** (the default) draws only
-workload sitting on a connectivity edge, **Full inventory** draws every loaded
-pod plus the infrastructure nothing references — which is what `make verify`
-asserts against, so the two agree only in that position.
+copy. `cluster`, `az`, `env` and `namespace` filters are `kube_pod_info`
+label queries through the **KSM** Prometheus datasource (vmauth / single-node
+store) — that is the raw name, which is what `?cluster=` still accepts.
+`clusters[]` on the graph response is the composed identity
+`<az>-<env>-<cluster>` (`local-a-demo-ksg-demo` here) and is **not** a valid
+`?cluster=` value. `edge_type` calls the backend. `Projection` switches the
+backend's `?prune=`: **Traffic graph** (the default) draws only workload
+sitting on a connectivity edge, **Full inventory** draws every loaded pod plus
+the infrastructure nothing references — which is what `make verify` asserts
+against, so the two agree only in that position.
 
 ## Troubleshooting
 
@@ -340,6 +346,9 @@ backend builds over the requested window, and nothing has been scraped yet.
 | Edges have no `p90ServerMs` | the collector's `transform/servicegraph-names` — with metric suffixes off, the histogram loses its `_seconds` and must have it put back |
 | `/readyz` is 503 naming a backend | that store is down or unreachable; the body names the backend, never its URL |
 | Everything filtered by `?az=` is empty | vmagent's `external_labels` and the collector's `transform/external-labels` disagree — both must come from `global.ksgExternalLabels` |
+| Graph ids / cluster compound read `local-a-demo-ksg-demo` | expected: that is the composed identity `<az>-<env>-<cluster>` |
+| `?cluster=local-a-demo-ksg-demo` is empty | expected: `?cluster=` takes the raw name `ksg-demo`; pin with `?az=local-a&env=demo&cluster=ksg-demo` |
+| Cluster dropdown is empty | Grafana's KSM datasource (`victoriametrics-ksm`) is not answering vmauth — check `KSG_UPSTREAM_*` env on the Grafana pod |
 | Backend logs "upstream backends did not answer" right after `make up` | expected: the server is ready before either store is, and it retries |
 
 ## Requirements
