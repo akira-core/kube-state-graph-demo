@@ -36,7 +36,7 @@
           "type": "json",
           "source": "url",
           "format": "table",
-          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${cluster:customqueryparam:cluster:}&${env:customqueryparam:env:}&${namespace:customqueryparam:namespace:}&${edge_type:customqueryparam:edge_type:}&prune=${prune}",
+          "url": "/v1/graph?start=${__from:date:seconds}&end=${__to:date:seconds}&${az:customqueryparam:az:}&${env:customqueryparam:env:}&${cluster:customqueryparam:cluster:}&${namespace:customqueryparam:namespace:}&${edge_type:customqueryparam:edge_type:}&prune=${prune}",
           "url_options": {
             "method": "GET"
           }
@@ -58,13 +58,33 @@
       {
         "name": "cluster",
         "label": "Cluster",
+        "description": "Raw kube_pod_info cluster label (ksg-demo), not the composed identity the graph lists in clusters[]. Sending clusters[] back as ?cluster= returns an empty graph.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "victoriametrics"
+          "uid": "victoriametrics-ksm"
         },
         "query": "label_values(kube_pod_info, cluster)",
         "definition": "label_values(kube_pod_info, cluster)",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 1,
+        "sort": 1,
+        "regex": "",
+        "current": {},
+        "options": [],
+        "hide": 0
+      },
+      {
+        "name": "az",
+        "label": "AZ",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics-ksm"
+        },
+        "query": "label_values(kube_pod_info, az)",
+        "definition": "label_values(kube_pod_info, az)",
         "multi": true,
         "includeAll": true,
         "refresh": 1,
@@ -80,7 +100,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "victoriametrics"
+          "uid": "victoriametrics-ksm"
         },
         "query": "label_values(kube_pod_info, env)",
         "definition": "label_values(kube_pod_info, env)",
@@ -99,7 +119,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "victoriametrics"
+          "uid": "victoriametrics-ksm"
         },
         "query": "label_values(kube_pod_info, namespace)",
         "definition": "label_values(kube_pod_info, namespace)",
@@ -279,6 +299,6 @@
   "timezone": "",
   "title": "KSG Demo",
   "uid": "ksg-demo",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

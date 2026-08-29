@@ -91,22 +91,28 @@ redraws identically, and nothing anywhere reports that the filter did nothing.
 - **WHEN** the backend requests a provisioned dashboard makes are inspected
 - **THEN** none carries a query parameter the pinned backend has withdrawn
 
-### Requirement: Cluster, environment and namespace filters come from the pod inventory
+### Requirement: Cluster, availability-zone, environment and namespace filters come from the pod inventory
 
-The `cluster`, `env` and `namespace` filter controls SHALL be populated from the label
-values carried by the pod inventory in the metric store, not from the graph API. The
-backend pushes these filters upstream as raw label matchers against the same families,
-so sourcing the options from the same labels guarantees that every value offered is one
-the filter can act on.
+The `cluster`, `az`, `env` and `namespace` filter controls SHALL be populated from the
+label values carried by `kube_pod_info` in the **single-node** metric store (the store
+that holds kube-state-metrics), not from the graph API and not from the cluster-store
+Prometheus datasource. The backend pushes these filters upstream as raw label matchers
+against the same families, so sourcing the options from the same labels guarantees that
+every value offered is one the filter can act on.
 
-The dashboard SHALL offer an environment filter. It does not today, and the backend's
-environment filter path is otherwise exercised by nothing in the demo.
+`cluster` SHALL offer the **raw** `cluster` label (`ksg-demo` in this demo), never the
+composed identity the graph lists in `clusters[]` (`<az>-<env>-<cluster>`). A value
+read out of `clusters[]` and sent back as `?cluster=` SHALL match no series.
+
+The graph request SHALL send all three identity components (`az`, `env`, `cluster`) so
+a selection pins one identity rather than every zone's cluster of that raw name.
 
 #### Scenario: Filters offer exactly the values the demo carries
 
 - **WHEN** the dashboard loads against a running demo
-- **THEN** the cluster, environment and namespace controls each offer the values present
+- **THEN** the cluster, availability-zone, environment and namespace controls each offer the values present
   on the demo's pods
+- **AND** the cluster control offers the raw name, not the composed identity
 - **AND** under the unpruned projection none offers a value the graph filter would match
   nothing for
 
@@ -119,13 +125,18 @@ per-request choice and the option list is not rebuilt per selection.
 
 #### Scenario: Selecting a filter narrows the graph
 
-- **WHEN** a value is selected in the cluster, environment or namespace control
+- **WHEN** a value is selected in the cluster, availability-zone, environment or namespace control
 - **THEN** the rendered graph is restricted to that value
 
 #### Scenario: Filter controls survive a backend endpoint change
 
 - **WHEN** the backend stops serving an endpoint the dashboard's other panels use
-- **THEN** the cluster, environment and namespace controls are still populated
+- **THEN** the cluster, availability-zone, environment and namespace controls are still populated
+
+#### Scenario: A listed identity is not a cluster filter option
+
+- **WHEN** the graph response lists `clusters: ["local-a-demo-ksg-demo"]`
+- **THEN** the cluster dropdown still offers `ksg-demo` and does not offer `local-a-demo-ksg-demo`
 
 ### Requirement: The dashboard exposes the backend's projection choice
 

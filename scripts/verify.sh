@@ -20,6 +20,14 @@ BACKEND="${2:-http://localhost:18080}"
 VMAUTH="${3:-http://localhost:18427}"
 VMAUTH_USER="${4:-ksg}"
 VMAUTH_PASS="${5:-ksg-demo-not-a-real-secret}"
+GRAFANA="${6:-http://localhost:3001}"
+
+# Must match global.ksgExternalLabels. The backend composes
+# <az>-<env>-<cluster> as the identity; ?cluster= still takes the raw name.
+KSG_CLUSTER_RAW="ksg-demo"
+KSG_AZ="local-a"
+KSG_ENV="demo"
+KSG_CLUSTER_IDENTITY="${KSG_AZ}-${KSG_ENV}-${KSG_CLUSTER_RAW}"
 
 pass=0
 fail=0
@@ -317,6 +325,52 @@ else
     printf '  \033[32m ok \033[0m  %-46s all carry data.application\n' "shop/platform pod application"
     pass=$((pass + 1))
   fi
+
+  # Cluster identity is <az>-<env>-<cluster>. A build that still keys on the
+  # raw name (or whose stampers disagree) is a silently-wrong graph: ids
+  # collide across zones and ?cluster= round-trips from clusters[] stop
+  # working. The three request dimensions ARE the identity's components.
+  got_clusters=$(jq -c '.clusters' <<<"${graph}")
+  if [[ "${got_clusters}" == "[\"${KSG_CLUSTER_IDENTITY}\"]" ]]; then
+    check "clusters[] is the composed identity" yes "${got_clusters}"
+  else
+    check "clusters[] is the composed identity" no \
+      "got ${got_clusters}, expected [\"${KSG_CLUSTER_IDENTITY}\"] — stampers disagree or identity did not compose"
+  fi
+
+  raw_on_elements=$(jq --arg raw "${KSG_CLUSTER_RAW}" \
+    '[.elements.nodes[], .elements.edges[] | select(.data.labels.cluster == $raw)] | length' \
+    <<<"${graph}")
+  if [[ "${raw_on_elements}" == "0" ]]; then
+    check "no element carries the raw cluster label" yes \
+      "${KSG_CLUSTER_RAW} is the ?cluster= value, not labels.cluster"
+  else
+    check "no element carries the raw cluster label" no \
+      "${raw_on_elements} elements still labelled ${KSG_CLUSTER_RAW}"
+  fi
+
+  raw_filtered=$(curl -sS --max-time 30 \
+    "${BACKEND}/v1/graph?start=$(( now - 300 ))&end=${now}&prune=false&cluster=${KSG_CLUSTER_RAW}" \
+    2>/dev/null)
+  raw_nodes=$(jq '[.elements.nodes[]?] | length' <<<"${raw_filtered}" 2>/dev/null || echo 0)
+  if [[ "${raw_nodes}" != "0" && "${raw_nodes}" != "null" ]]; then
+    check "?cluster=${KSG_CLUSTER_RAW} (raw name) still loads" yes "${raw_nodes} nodes"
+  else
+    check "?cluster=${KSG_CLUSTER_RAW} (raw name) still loads" no \
+      "empty — projection is matching the identity instead of the raw component"
+  fi
+
+  identity_filtered=$(curl -sS --max-time 30 \
+    "${BACKEND}/v1/graph?start=$(( now - 300 ))&end=${now}&prune=false&cluster=${KSG_CLUSTER_IDENTITY}" \
+    2>/dev/null)
+  identity_nodes=$(jq '[.elements.nodes[]?] | length' <<<"${identity_filtered}" 2>/dev/null || echo 0)
+  identity_clusters=$(jq -c '.clusters // []' <<<"${identity_filtered}" 2>/dev/null || echo '[]')
+  if [[ "${identity_nodes}" == "0" && "${identity_clusters}" == "[]" ]]; then
+    check "?cluster=<identity> is empty (not a filter value)" yes "200 with empty elements"
+  else
+    check "?cluster=<identity> is empty (not a filter value)" no \
+      "${identity_nodes} nodes / clusters ${identity_clusters} — identity leaked into ?cluster="
+  fi
 fi
 
 echo
@@ -350,6 +404,61 @@ else
       pass=$((pass + 1))
     fi
   done <<<"${dash_paths}"
+
+  # Cluster / az / env / namespace MUST query kube_pod_info on the KSM
+  # datasource (single-node store). The cluster-store uid has no kube_pod_info,
+  # and clusters[] is the composed identity — neither is a valid ?cluster= value.
+  dash_json="${dash_dir}/ksg-demo.json"
+  if [[ -f "${dash_json}" ]]; then
+    graph_url=$(jq -r '.panels[0].targets[0].url // empty' "${dash_json}")
+    if [[ "${graph_url}" == *'${az:customqueryparam:az:}'* && \
+          "${graph_url}" == *'${cluster:customqueryparam:cluster:}'* && \
+          "${graph_url}" == *'${env:customqueryparam:env:}'* ]]; then
+      check "graph URL sends az + env + cluster" yes "identity triple is request-shaped"
+    else
+      check "graph URL sends az + env + cluster" no \
+        "missing a customqueryparam — pinning one identity needs all three"
+    fi
+    for var in cluster az env namespace; do
+      uid=$(jq -r --arg n "${var}" \
+        '.templating.list[] | select(.name == $n) | .datasource.uid // empty' \
+        "${dash_json}")
+      query=$(jq -r --arg n "${var}" \
+        '.templating.list[] | select(.name == $n) | .query // empty' \
+        "${dash_json}")
+      if [[ "${uid}" == "victoriametrics-ksm" && "${query}" == "label_values(kube_pod_info, ${var})" ]]; then
+        check "dashboard \$${var} reads kube_pod_info via KSM store" yes "uid=${uid}"
+      else
+        check "dashboard \$${var} reads kube_pod_info via KSM store" no \
+          "uid=${uid:-<missing>} query=${query:-<missing>}"
+      fi
+    done
+  fi
+fi
+
+echo
+echo "== 11. Grafana Cluster dropdown sees the raw name =="
+# Live proof the provisioned KSM datasource actually answers. A 401 here is
+# envValueFrom not reaching Grafana; empty values is the uid still pointing
+# at the cluster store.
+ds=$(curl -sS --max-time 20 "${GRAFANA}/api/datasources/uid/victoriametrics-ksm" 2>/dev/null || true)
+if jq -e '.uid == "victoriametrics-ksm"' <<<"${ds}" >/dev/null 2>&1; then
+  check "Grafana KSM datasource is provisioned" yes "$(jq -r '.url' <<<"${ds}")"
+else
+  check "Grafana KSM datasource is provisioned" no \
+    "GET /api/datasources/uid/victoriametrics-ksm failed — helm values not applied?"
+fi
+
+labels=$(curl -sS --max-time 20 \
+  "${GRAFANA}/api/datasources/proxy/uid/victoriametrics-ksm/api/v1/label/cluster/values?match[]=kube_pod_info" \
+  2>/dev/null || true)
+if jq -e --arg raw "${KSG_CLUSTER_RAW}" '.status == "success" and (.data | index($raw) != null)' \
+    <<<"${labels}" >/dev/null 2>&1; then
+  check "Cluster dropdown offers ${KSG_CLUSTER_RAW}" yes \
+    "$(jq -c '.data' <<<"${labels}")"
+else
+  check "Cluster dropdown offers ${KSG_CLUSTER_RAW}" no \
+    "$(jq -c '.' <<<"${labels}" 2>/dev/null || echo "unreadable") — dropdown would be empty"
 fi
 
 echo

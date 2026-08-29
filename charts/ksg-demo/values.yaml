@@ -15,9 +15,11 @@ global:
   # The three labels kube-state-metrics cannot emit. TWO components stamp them
   # now that the estate is split across two stores — vmagent on what it scrapes,
   # the OpenTelemetry Collector on the service-graph series it derives — and
-  # every graph id is cluster-scoped while ?az= / ?env= are pushed to upstream
-  # PromQL as raw matchers. A value that differed between the two would silently
-  # drop half the graph out of any filtered request, so both read from here.
+  # the backend composes them into the cluster identity `<az>-<env>-<cluster>`
+  # (every id prefix, `labels.cluster`, `clusters[]`). `?az=` / `?env=` /
+  # `?cluster=` are still pushed as raw matchers, so a value that differed
+  # between the two would silently split the graph into two identities (or
+  # drop half of it out of any filtered request). Both read from here.
   ksgExternalLabels:
     cluster: ksg-demo
     az: local-a
@@ -600,6 +602,20 @@ grafana:
     # writes to.
     GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: marz32one-ksg-panel
 
+  # Same Secret the backend and the faker read. Grafana expands
+  # $KSG_UPSTREAM_* in the KSM datasource provisioning file at startup;
+  # the names match the backend's usernameEnv / passwordEnv so a typo
+  # here and a typo there cannot drift.
+  envValueFrom:
+    KSG_UPSTREAM_USERNAME:
+      secretKeyRef:
+        name: ksg-upstream-auth
+        key: username
+    KSG_UPSTREAM_PASSWORD:
+      secretKeyRef:
+        name: ksg-upstream-auth
+        key: password
+
   grafana.ini:
     auth.anonymous:
       enabled: true
@@ -643,14 +659,34 @@ grafana:
           isDefault: false
           jsonData:
             timeout: 30
-        # Not needed by the panel — there so the demo can be inspected with
-        # plain PromQL when a graph looks wrong.
+        # Explore / ad-hoc PromQL against the CLUSTER store (Harvest,
+        # service-graph). kube_pod_info is NOT here — that family lives in
+        # the single-node store behind vmauth. Pointing a dashboard
+        # dropdown at this uid silently empties it.
         - name: VictoriaMetrics
           type: prometheus
           uid: victoriametrics
           url: http://vm-vmselect:8481/select/0/prometheus
           access: proxy
           isDefault: true
+        # kube_pod_info / kubelet — the store the Cluster / AZ / Env /
+        # Namespace dropdowns MUST query. ?cluster= takes the RAW name
+        # from this family; clusters[] on the graph response is the
+        # composed <az>-<env>-<cluster> identity and is not a valid
+        # filter value. Credentials expand from envValueFrom above;
+        # print keeps `$` out of Helm's tpl.
+        - name: VictoriaMetrics KSM
+          type: prometheus
+          uid: victoriametrics-ksm
+          url: http://vm-auth:8427
+          access: proxy
+          isDefault: false
+          basicAuth: true
+          basicAuthUser: '{{ print "$KSG_UPSTREAM_USERNAME" }}'
+          jsonData:
+            timeout: 30
+          secureJsonData:
+            basicAuthPassword: '{{ print "$KSG_UPSTREAM_PASSWORD" }}'
 
   dashboardProviders:
     dashboardproviders.yaml:
