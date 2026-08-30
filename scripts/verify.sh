@@ -20,7 +20,9 @@ BACKEND="${2:-http://localhost:18080}"
 VMAUTH="${3:-http://localhost:18427}"
 VMAUTH_USER="${4:-ksg}"
 VMAUTH_PASS="${5:-ksg-demo-not-a-real-secret}"
-GRAFANA="${6:-http://localhost:3001}"
+# The front door. Sections 10 and 11 go THROUGH it rather than straight to the
+# backend or the store, because the same-origin proxying is itself under test.
+FRONTEND="${6:-http://localhost:3001}"
 
 # Must match global.ksgExternalLabels. The backend composes
 # <az>-<env>-<cluster> as the identity; ?cluster= still takes the raw name.
@@ -374,91 +376,106 @@ else
 fi
 
 echo
-echo "== 10. provisioned dashboard backend URLs resolve =="
-# Every /v1 path the authored dashboard still calls. Relative URLs are
-# against the Infinity datasource (the graph API). A 404 here is the
-# silent-dropdown failure this check exists to catch.
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dash_dir="${repo_root}/charts/ksg-demo/dashboards"
-if [[ ! -d "${dash_dir}" ]]; then
-  printf '  \033[31mFAIL\033[0m  %s\n' "charts/ksg-demo/dashboards/ is missing"
-  fail=$((fail + 1))
+echo "== 10. the front door serves its config and reaches the backend through itself =="
+# The SPA fetches <origin>/config.json on every full page load and then asks for
+# exactly what that file names. Both halves are asserted here, and the graph
+# request goes through the FRONT DOOR's origin, not straight to the backend:
+# a 404 from the proxy is the empty-canvas failure this demo exists to catch,
+# and it is invisible from the backend side.
+code=$(curl -sS --max-time 20 -o /tmp/ksg-verify-config.json -w '%{http_code}' \
+  "${FRONTEND}/config.json" 2>/dev/null || echo 000)
+if [[ "${code}" == 200 ]] && jq -e . /tmp/ksg-verify-config.json >/dev/null 2>&1; then
+  check "front door serves a parseable /config.json" yes "HTTP ${code}"
 else
-  dash_paths=$(grep -RhoE '/v1/[A-Za-z0-9_/-]+' "${dash_dir}" | sort -u)
-  if [[ -z "${dash_paths}" ]]; then
-    printf '  \033[31mFAIL\033[0m  %s\n' "no /v1 paths found in provisioned dashboards"
-    fail=$((fail + 1))
-  fi
-  while IFS= read -r path; do
-    [[ -n "${path}" ]] || continue
-    url="${BACKEND}${path}"
-    if [[ "${path}" == "/v1/graph" ]]; then
-      url="${url}?start=$(( now - 300 ))&end=${now}"
-    fi
-    code=$(curl -sS --max-time 20 -o /tmp/ksg-verify-dash.body -w '%{http_code}' "${url}" 2>/dev/null || echo 000)
-    if [[ "${code}" != 200 ]]; then
-      printf '  \033[31mFAIL\033[0m  %-46s HTTP %s\n' "${path}" "${code}"
-      fail=$((fail + 1))
-    else
-      printf '  \033[32m ok \033[0m  %-46s HTTP %s\n' "${path}" "${code}"
-      pass=$((pass + 1))
-    fi
-  done <<<"${dash_paths}"
+  check "front door serves a parseable /config.json" no \
+    "HTTP ${code} — the ConfigMap is not mounted, or nginx is not serving /srv/config"
+fi
 
-  # Cluster / az / env / namespace MUST query kube_pod_info on the KSM
-  # datasource (single-node store). The cluster-store uid has no kube_pod_info,
-  # and clusters[] is the composed identity — neither is a valid ?cluster= value.
-  dash_json="${dash_dir}/ksg-demo.json"
-  if [[ -f "${dash_json}" ]]; then
-    graph_url=$(jq -r '.panels[0].targets[0].url // empty' "${dash_json}")
-    if [[ "${graph_url}" == *'${az:customqueryparam:az:}'* && \
-          "${graph_url}" == *'${cluster:customqueryparam:cluster:}'* && \
-          "${graph_url}" == *'${env:customqueryparam:env:}'* ]]; then
-      check "graph URL sends az + env + cluster" yes "identity triple is request-shaped"
-    else
-      check "graph URL sends az + env + cluster" no \
-        "missing a customqueryparam — pinning one identity needs all three"
-    fi
-    for var in cluster az env namespace; do
-      uid=$(jq -r --arg n "${var}" \
-        '.templating.list[] | select(.name == $n) | .datasource.uid // empty' \
-        "${dash_json}")
-      query=$(jq -r --arg n "${var}" \
-        '.templating.list[] | select(.name == $n) | .query // empty' \
-        "${dash_json}")
-      if [[ "${uid}" == "victoriametrics-ksm" && "${query}" == "label_values(kube_pod_info, ${var})" ]]; then
-        check "dashboard \$${var} reads kube_pod_info via KSM store" yes "uid=${uid}"
-      else
-        check "dashboard \$${var} reads kube_pod_info via KSM store" no \
-          "uid=${uid:-<missing>} query=${query:-<missing>}"
-      fi
-    done
+if jq -e '.demoMode == false' /tmp/ksg-verify-config.json >/dev/null 2>&1; then
+  check "front door is NOT in demo mode" yes "demoMode=false"
+else
+  check "front door is NOT in demo mode" no \
+    "demoMode is not false — the SPA would draw its own bundled fixture, which proves nothing"
+fi
+
+# Health does not read the config or the backend, so it separates "the server is
+# down" from "the pipeline is down".
+code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "${FRONTEND}/healthz" 2>/dev/null || echo 000)
+check "front door answers /healthz" "$( [[ "${code}" == 200 ]] && echo yes || echo no )" "HTTP ${code}"
+
+graph_path=$(jq -r '.endpoints.graph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -z "${graph_path}" ]]; then
+  check "config names a graph endpoint" no "endpoints.graph is absent — the SPA cannot load at all"
+else
+  # Unpruned, like every other graph request this script makes: the default
+  # projection returns only connectivity-connected workload, and this script
+  # counts the inventory.
+  code=$(curl -sS --max-time 30 -o /tmp/ksg-verify-fe-graph.json -w '%{http_code}' \
+    "${FRONTEND}${graph_path}?start=$(( now - 300 ))&end=${now}&prune=false" 2>/dev/null || echo 000)
+  elems=$(jq '(.elements.nodes | length) + (.elements.edges | length)' /tmp/ksg-verify-fe-graph.json 2>/dev/null || echo 0)
+  if [[ "${code}" == 200 ]] && [[ "${elems}" =~ ^[0-9]+$ ]] && (( elems > 0 )); then
+    check "graph answers through the front door (${graph_path})" yes "HTTP ${code}, ${elems} elements"
+  else
+    check "graph answers through the front door (${graph_path})" no \
+      "HTTP ${code}, ${elems} elements — nginx /api/ is not reaching kube-state-graph"
+  fi
+fi
+
+# The catalogue that validates ?edge_type=. The SPA populates its edge-type
+# control from it, so a control offering a value this does not list would be a
+# 400 rather than a narrowed graph.
+edge_path=$(jq -r '.endpoints.edgeTypes // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -n "${edge_path}" ]]; then
+  types=$(curl -sS --max-time 20 "${FRONTEND}${edge_path}" 2>/dev/null | jq -r '[.edge_types[].type] | length' 2>/dev/null || echo 0)
+  if [[ "${types}" =~ ^[0-9]+$ ]] && (( types > 0 )); then
+    check "edge-type catalogue answers through the front door" yes "${types} registered types"
+  else
+    check "edge-type catalogue answers through the front door" no \
+      "no types returned — the edge-type control would be empty"
   fi
 fi
 
 echo
-echo "== 11. Grafana Cluster dropdown sees the raw name =="
-# Live proof the provisioned KSM datasource actually answers. A 401 here is
-# envValueFrom not reaching Grafana; empty values is the uid still pointing
-# at the cluster store.
-ds=$(curl -sS --max-time 20 "${GRAFANA}/api/datasources/uid/victoriametrics-ksm" 2>/dev/null || true)
-if jq -e '.uid == "victoriametrics-ksm"' <<<"${ds}" >/dev/null 2>&1; then
-  check "Grafana KSM datasource is provisioned" yes "$(jq -r '.url' <<<"${ds}")"
+echo "== 11. filter options come from the SINGLE-NODE store, through the front door =="
+# The four identity controls read kube_pod_info label values. They must reach
+# the store that HOLDS that family (single-node, behind vmauth) and they must
+# offer the RAW cluster name: the graph response's clusters[] is the composed
+# <az>-<env>-<cluster> identity, and feeding that back as ?cluster= returns an
+# empty 200 — a filter that appears to work and moves nothing.
+#
+# The credential is attached by the front door's nginx, in-cluster. This curl
+# deliberately sends none: if it needed one, so would the browser.
+lv_base=$(jq -r '.endpoints.labelValues // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -z "${lv_base}" ]]; then
+  check "config names a label-values endpoint" no \
+    "endpoints.labelValues is absent — the identity controls would be empty"
 else
-  check "Grafana KSM datasource is provisioned" no \
-    "GET /api/datasources/uid/victoriametrics-ksm failed — helm values not applied?"
-fi
+  for dim in cluster az env namespace; do
+    body=$(curl -sS --max-time 20 \
+      "${FRONTEND}${lv_base}/api/v1/label/${dim}/values?match[]=kube_pod_info" 2>/dev/null || true)
+    count=$(jq -r '.data | length' <<<"${body}" 2>/dev/null || echo 0)
+    if jq -e '.status == "success"' <<<"${body}" >/dev/null 2>&1 && [[ "${count}" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+      check "\$${dim} options via the front door" yes "$(jq -c '.data' <<<"${body}")"
+    else
+      check "\$${dim} options via the front door" no \
+        "$(jq -c '.' <<<"${body}" 2>/dev/null || echo "unreadable") — no credential attached, or the wrong store"
+    fi
+  done
 
-labels=$(curl -sS --max-time 20 \
-  "${GRAFANA}/api/datasources/proxy/uid/victoriametrics-ksm/api/v1/label/cluster/values?match[]=kube_pod_info" \
-  2>/dev/null || true)
-if jq -e --arg raw "${KSG_CLUSTER_RAW}" '.status == "success" and (.data | index($raw) != null)' \
-    <<<"${labels}" >/dev/null 2>&1; then
-  check "Cluster dropdown offers ${KSG_CLUSTER_RAW}" yes \
-    "$(jq -c '.data' <<<"${labels}")"
-else
-  check "Cluster dropdown offers ${KSG_CLUSTER_RAW}" no \
-    "$(jq -c '.' <<<"${labels}" 2>/dev/null || echo "unreadable") — dropdown would be empty"
+  clusters=$(curl -sS --max-time 20 \
+    "${FRONTEND}${lv_base}/api/v1/label/cluster/values?match[]=kube_pod_info" 2>/dev/null || true)
+  if jq -e --arg raw "${KSG_CLUSTER_RAW}" '.data | index($raw) != null' <<<"${clusters}" >/dev/null 2>&1; then
+    check "cluster control offers the raw ${KSG_CLUSTER_RAW}" yes "$(jq -c '.data' <<<"${clusters}")"
+  else
+    check "cluster control offers the raw ${KSG_CLUSTER_RAW}" no \
+      "$(jq -c '.data' <<<"${clusters}" 2>/dev/null || echo "unreadable") — the control would select nothing"
+  fi
+  if jq -e --arg id "${KSG_CLUSTER_IDENTITY}" '.data | index($id) == null' <<<"${clusters}" >/dev/null 2>&1; then
+    check "cluster control does NOT offer ${KSG_CLUSTER_IDENTITY}" yes "composed identity absent, as it must be"
+  else
+    check "cluster control does NOT offer ${KSG_CLUSTER_IDENTITY}" no \
+      "the composed identity is being offered as a filter value — it matches no series"
+  fi
 fi
 
 echo

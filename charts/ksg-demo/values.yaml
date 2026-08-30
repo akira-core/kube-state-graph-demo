@@ -458,7 +458,7 @@ opentelemetry-collector:
           exporters: [prometheus_remote_write]
 
 # ---------------------------------------------------------------------------
-# kube-state-graph — the API the panel calls.
+# kube-state-graph — the API the front door calls.
 # ---------------------------------------------------------------------------
 kube-state-graph:
   fullnameOverride: kube-state-graph
@@ -582,124 +582,45 @@ demo-workloads:
       - nfsvers=4.1
 
 # ---------------------------------------------------------------------------
-# Grafana — anonymous Admin, because this is a laptop demo with no secrets in it.
+# The front door. A static SPA behind nginx, on the host port this demo has
+# always published its UI on (3001 -> nodePort 30300).
+#
+# Everything the browser asks for it asks of THIS origin: /api/ reaches the
+# backend, /metrics-api/api/v1/label/ reaches vmauth with the credential
+# attached in-cluster. Two reasons, both load-bearing. The backend would
+# otherwise need a CORS policy naming this origin, and the pod-inventory store
+# is behind basic auth that must not reach a browser.
+#
+# The chart replaces the image's /etc/nginx/nginx.conf wholesale, which is the
+# override point the frontend image documents. Do not also set
+# KSG_API_PROXY_TARGET: it makes the image's entrypoint write a second
+# `location /api/`, and nginx refuses to start on a duplicate location.
 # ---------------------------------------------------------------------------
-grafana:
-  fullnameOverride: grafana
+kube-state-graph-frontend:
+  fullnameOverride: kube-state-graph-frontend
 
   service:
     type: NodePort
     nodePort: 30300
 
-  # The Infinity datasource is the transport: the panel reads the backend's
-  # JSON through it rather than through a Grafana query language.
-  plugins:
-    - yesoreyeram-infinity-datasource
+  config:
+    # Never true here. `true` renders the frontend's own bundled showcase
+    # fixture — a convincing graph that proves nothing about the pipeline
+    # behind it, which is the one thing this demo exists to show.
+    demoMode: false
+    refreshIntervalSeconds: 0
+    defaultLayout: fcose
+    theme: system
+    endpoints:
+      graph: /api/v1/graph
+      # A Prometheus API ROOT, not a query path. The identity filter controls
+      # read kube_pod_info label values from it, which is the ONLY source that
+      # yields values `?cluster=` can act on: the graph response carries the
+      # composed `<az>-<env>-<cluster>` identity, and sending that back matches
+      # no series and returns an empty 200.
+      labelValues: /metrics-api
+      edgeTypes: /api/v1/edge-types
 
-  env:
-    # The panel is built from source here and is therefore unsigned. The value
-    # is the plugin id, which must equal the directory the init container below
-    # writes to.
-    GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: marz32one-ksg-panel
-
-  # Same Secret the backend and the faker read. Grafana expands
-  # $KSG_UPSTREAM_* in the KSM datasource provisioning file at startup;
-  # the names match the backend's usernameEnv / passwordEnv so a typo
-  # here and a typo there cannot drift.
-  envValueFrom:
-    KSG_UPSTREAM_USERNAME:
-      secretKeyRef:
-        name: ksg-upstream-auth
-        key: username
-    KSG_UPSTREAM_PASSWORD:
-      secretKeyRef:
-        name: ksg-upstream-auth
-        key: password
-
-  grafana.ini:
-    auth.anonymous:
-      enabled: true
-      org_role: Admin
-    analytics:
-      reporting_enabled: false
-      check_for_updates: false
-    news:
-      news_feed_enabled: false
-
-  # Grafana loads panel plugins from disk, so the plugin image is a file
-  # carrier: copy it into the shared `storage` volume before Grafana starts.
-  extraInitContainers:
-    - name: install-ksg-panel
-      image: ksg-demo/panel:local
-      imagePullPolicy: Never
-      command:
-        - sh
-        - -c
-        - |
-          set -eu
-          dest=/var/lib/grafana/plugins/marz32one-ksg-panel
-          mkdir -p /var/lib/grafana/plugins
-          rm -rf "$dest"
-          cp -r /plugin "$dest"
-          echo "installed kube-state-graph panel:"
-          ls -l "$dest"
-      volumeMounts:
-        - name: storage
-          mountPath: /var/lib/grafana
-
-  datasources:
-    datasources.yaml:
-      apiVersion: 1
-      datasources:
-        - name: kube-state-graph
-          type: yesoreyeram-infinity-datasource
-          uid: ksg-default
-          url: http://kube-state-graph:8080
-          access: proxy
-          isDefault: false
-          jsonData:
-            timeout: 30
-        # Explore / ad-hoc PromQL against the CLUSTER store (Harvest,
-        # service-graph). kube_pod_info is NOT here — that family lives in
-        # the single-node store behind vmauth. Pointing a dashboard
-        # dropdown at this uid silently empties it.
-        - name: VictoriaMetrics
-          type: prometheus
-          uid: victoriametrics
-          url: http://vm-vmselect:8481/select/0/prometheus
-          access: proxy
-          isDefault: true
-        # kube_pod_info / kubelet — the store the Cluster / AZ / Env /
-        # Namespace dropdowns MUST query. ?cluster= takes the RAW name
-        # from this family; clusters[] on the graph response is the
-        # composed <az>-<env>-<cluster> identity and is not a valid
-        # filter value. Credentials expand from envValueFrom above;
-        # print keeps `$` out of Helm's tpl.
-        - name: VictoriaMetrics KSM
-          type: prometheus
-          uid: victoriametrics-ksm
-          url: http://vm-auth:8427
-          access: proxy
-          isDefault: false
-          basicAuth: true
-          basicAuthUser: '{{ print "$KSG_UPSTREAM_USERNAME" }}'
-          jsonData:
-            timeout: 30
-          secureJsonData:
-            basicAuthPassword: '{{ print "$KSG_UPSTREAM_PASSWORD" }}'
-
-  dashboardProviders:
-    dashboardproviders.yaml:
-      apiVersion: 1
-      providers:
-        - name: ksg
-          orgId: 1
-          folder: 'kube-state-graph'
-          type: file
-          disableDeletion: false
-          editable: true
-          options:
-            path: /var/lib/grafana/dashboards/ksg
-
-  dashboardsConfigMaps:
-    ksg: ksg-dashboards
+  proxy:
+    graph: http://kube-state-graph:8080
+    labelValues: http://vm-auth:8427

@@ -2,7 +2,7 @@
 	path = kube-state-graph
 	url = https://github.com/akira-core/kube-state-graph
 	branch = main
-[submodule "kube-state-graph-panel"]
-	path = kube-state-graph-panel
-	url = https://github.com/akira-core/kube-state-graph-panel
-	branch = node-group-compound-parent
+[submodule "kube-state-graph-frontend"]
+	path = kube-state-graph-frontend
+	url = https://github.com/akira-core/kube-state-graph-frontend
+	branch = feat/pure-ui-frontend

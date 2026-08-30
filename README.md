@@ -1,18 +1,20 @@
 # kube-state-graph-demo
 
 A complete, self-drawing demo of [`kube-state-graph`](https://github.com/akira-core/kube-state-graph)
-and [`kube-state-graph-panel`](https://github.com/akira-core/kube-state-graph-panel)
+and [`kube-state-graph-frontend`](https://github.com/akira-core/kube-state-graph-frontend)
 on a local **kind** cluster.
 
 One `make up` builds both projects from source, stands up the whole metrics
 pipeline behind them, deploys a synthetic microservice estate that calls itself,
-and hands you a Grafana dashboard drawing that estate as an interactive graph.
+and hands you a standalone web UI drawing that estate as an interactive graph.
+There is no Grafana: the front end is its own single-page application, served by
+nginx, talking to the backend through its own origin.
 
-![The KSG Demo dashboard](docs/ksg-demo.png)
+![The front door: the demo estate as a live graph](docs/ksg-demo.png)
 
 ```bash
 make up          # ~5 minutes on a cold laptop
-open http://localhost:3001      # Grafana → dashboard "KSG Demo"
+open http://localhost:3001      # the front door: Graph and Sankey views
 ```
 
 Then:
@@ -82,7 +84,11 @@ appear within one tick.
                       └────────┬─────────┘                                     │
                                │ /v1/graph (Cytoscape JSON)                    │
                       ┌────────▼─────────┐                                     │
-                      │ Grafana + Infinity datasource + KSG panel              │
+                      │ kube-state-graph-frontend (nginx + SPA)                │
+                      │   /api/          ─────────▶ kube-state-graph             │
+                      │   /metrics-api/  ─────────▶ vmauth (credential attached  │
+                      │                              in-cluster, never in the    │
+                      │                              browser)                    │
                       └────────────────────────────────────────────────────────┘
 ```
 
@@ -178,7 +184,7 @@ A demo where everything is green teaches nothing. These are on purpose:
   the demo working, not failing.
 - **`orders` answers 5% of requests with a 500**, so its edges carry a non-zero
   `errorRate`. An edge with `errorRate: 0` and an edge with no measurement at
-  all must look different in the panel.
+  all must look different in the UI.
 - **`ontap-lab-02` reports `node_new_status 0`.** Degraded is a real reading,
   distinct from the series being absent.
 - **`mongodb`'s Service is headless**, so its `cluster_ip` is `None` and it
@@ -194,17 +200,18 @@ A demo where everything is green teaches nothing. These are on purpose:
 ```
 charts/
   ksg-demo/          umbrella release: pins every upstream chart + the local ones
-  ksg-demo/dashboards/  authored KSG Demo dashboard (this repo is the source)
   kube-state-graph/  the API server
+  kube-state-graph-frontend/  the front door: SPA config + nginx proxies
   netapp-faker/      the one fake component
   demo-workloads/    namespaces, StorageClass, workloads, Services, claims
   nfs-server/        in-cluster Ganesha export for csi-driver-nfs
-docker/              three Dockerfiles: backend, panel bundle, demo tools
+docker/              two Dockerfiles: backend, demo tools. The front end is built
+                     from the submodule's own Dockerfile — it ships a complete one
 kind/cluster.yaml    3 nodes, zone labels, host port mappings
 tools/               Go: the demo workload and the ONTAP faker
 scripts/             wait-ready, verify, charts-deps, vendor-charts
-kube-state-graph/        ── git submodule
-kube-state-graph-panel/  ── git submodule
+kube-state-graph/           ── git submodule
+kube-state-graph-frontend/  ── git submodule
 ```
 
 ### Chart dependencies are vendored, unpacked
@@ -214,7 +221,6 @@ directories, not fetched at bring-up and not stored as `.tgz`:
 
 ```
 charts/ksg-demo/charts/
-  grafana/                   10.5.15    ── vendored, tracked
   kube-state-metrics/        8.4.0      ── vendored, tracked
   opentelemetry-collector/   0.170.0    ── vendored, tracked
   victoria-metrics-cluster/  0.49.0     ── vendored, tracked   store 1
@@ -254,8 +260,8 @@ as one or `make deps` reports the vendored set as stale.
 
 Vendoring the charts is not by itself enough to bring the demo up on a
 disconnected laptop — `kind create cluster`, the three `docker build`s (base
-images, `go mod download`, `npm ci`), the seven upstream container images and
-Grafana's Infinity plugin download all still reach out. What it does buy is that
+images, `go mod download`, `npm ci`) and the upstream container images all
+still reach out. What it does buy is that
 none of that happens at *Helm* time, and that a warm Docker cache is the only
 other thing standing between a cold checkout and an offline bring-up.
 
@@ -265,8 +271,8 @@ registry involved. To demo an unpushed local change, point the build at your own
 working copy:
 
 ```bash
-make redeploy-backend BACKEND_SRC=../kube-state-graph
-make redeploy-panel   PANEL_SRC=../kube-state-graph-panel
+make redeploy-backend  BACKEND_SRC=../kube-state-graph
+make redeploy-frontend FRONTEND_SRC=../kube-state-graph-frontend
 make redeploy-workloads
 ```
 
@@ -280,28 +286,58 @@ from inside a subchart's values.
 
 | | URL | Notes |
 |---|---|---|
-| Grafana | <http://localhost:3001> | anonymous Admin; dashboards in the `kube-state-graph` folder |
+| Front door | <http://localhost:3001> | the SPA: Graph and Sankey views, with the filter bar |
 | Graph API | <http://localhost:18080/docs> | Scalar UI over the OpenAPI spec |
 | VM cluster store | <http://localhost:18481/select/0/prometheus> | vmselect — Harvest and service-graph series, in raw PromQL |
 | VM single store | <http://localhost:18427> | vmauth — kube-state-metrics and kubelet series. Needs `curl -u ksg:ksg-demo-not-a-real-secret` |
 
-Grafana is on **3001**, not the usual 3000, so this can run beside the panel
-repo's own `docker-compose` demo.
+The front door is on **3001**, not the usual 3000, so this can run beside the
+frontend repo's own `npm run dev`.
 
-One dashboard is provisioned, authored in this repository at
-`charts/ksg-demo/dashboards/ksg-demo.json`. Bring-up does not copy from the
-panel submodule: that tree deleted the backend-backed dashboard and now
-ships only a generated fixture, so a sync could only destroy the demo's
-copy. `cluster`, `az`, `env` and `namespace` filters are `kube_pod_info`
-label queries through the **KSM** Prometheus datasource (vmauth / single-node
-store) — that is the raw name, which is what `?cluster=` still accepts.
-`clusters[]` on the graph response is the composed identity
-`<az>-<env>-<cluster>` (`local-a-demo-ksg-demo` here) and is **not** a valid
-`?cluster=` value. `edge_type` calls the backend. `Projection` switches the
-backend's `?prune=`: **Traffic graph** (the default) draws only workload
-sitting on a connectivity edge, **Full inventory** draws every loaded pod plus
-the infrastructure nothing references — which is what `make verify` asserts
-against, so the two agree only in that position.
+**There is no Grafana.** Ad-hoc PromQL goes straight to the stores — and you have
+to ask the right one:
+
+```bash
+# cluster store: Harvest, service-graph
+curl -sG http://localhost:18481/select/0/prometheus/api/v1/query --data-urlencode 'query=volume_labels'
+
+# single-node store: kube-state-metrics, kubelet. Basic auth.
+curl -sG -u ksg:ksg-demo-not-a-real-secret http://localhost:18427/api/v1/query \
+  --data-urlencode 'query=kube_pod_info'
+```
+
+A query sent to the wrong store returns an empty result that looks exactly like a
+broken pipeline, which is why every `verify.sh` section header names its store.
+
+The front door's runtime configuration is authored in this repository, at
+`charts/kube-state-graph-frontend/values.yaml`, and mounted as
+`/srv/config/config.json`. It sets `demoMode: false` — `true` would render the
+frontend's own bundled showcase fixture, a convincing graph that proves nothing
+about the pipeline behind it.
+
+Everything the browser fetches it fetches from **its own origin**, and nginx
+forwards it in-cluster:
+
+| Browser asks | Reaches | Why not direct |
+|---|---|---|
+| `/api/v1/graph`, `/api/v1/edge-types` | `kube-state-graph:8080` | the backend would otherwise need a CORS policy naming this origin |
+| `/metrics-api/api/v1/label/<name>/values` | `vm-auth:8427`, with the basic-auth header attached in-cluster | the credential must never reach a browser |
+
+The filter bar sends what it collects straight to the backend. `cluster`, `az`,
+`env` and `namespace` options are `kube_pod_info` label values from the
+**single-node** store — that is the raw name, which is what `?cluster=` accepts.
+`clusters[]` on the graph response is the composed identity `<az>-<env>-<cluster>`
+(`local-a-demo-ksg-demo` here) and is **not** a valid `?cluster=` value.
+`edge_type` options come from `/v1/edge-types`, which is the same registry the
+backend validates that parameter against. `Projection` is the backend's
+`?prune=`: **Traffic graph** (the default) draws only workload sitting on a
+connectivity edge, **Full inventory** draws every loaded pod plus the
+infrastructure nothing references — which is what `make verify` asserts against,
+so the two agree only in that position.
+
+The time picker in the nav bar is the request window: the backend requires an
+absolute `start` and `end` on every call, and the front end resolves the
+selection at request time so a reload never re-asks for a stale window.
 
 ## Troubleshooting
 
@@ -333,12 +369,14 @@ them because the server is ready before either store is.
 
 The graph is also empty for a mundane reason for the first minute or so: the
 backend builds over the requested window, and nothing has been scraped yet.
-`make wait` (part of `make up`) blocks until a `pvc-to-netapp-aggr` edge exists
-— the longest chain in the demo, and therefore the last thing to appear.
+`make wait` (part of `make up`) blocks until the front door answers `/healthz`
+and until a `pvc-to-netapp-aggr` edge exists — the longest chain in the demo,
+and therefore the last thing to appear.
 
 | Symptom | Look at |
 |---|---|
-| Panel says "Datasource ksg-default was not found" | Grafana is still installing the Infinity plugin (needs network on first start) |
+| Front door loads but the graph is blank with an error | the `/api/` proxy is not reaching the backend — `kubectl -n monitoring logs deployment/kube-state-graph-frontend` |
+| Front door shows a graph with no live data behind it | `demoMode` is `true` in the served `/config.json`; the SPA is drawing its own bundled fixture |
 | Graph has pods but no call edges | `make logs-collector`; check `client_k8s_pod_uid` in `make verify` |
 | Call edges end in `external` nodes | the pod UID is not reaching the spans — check `OTEL_RESOURCE_ATTRIBUTES` on a workload |
 | No pods or nodes at all | `kubectl logs deployment/vm-agent` — nothing is scraping into the single-node store |
@@ -348,7 +386,8 @@ backend builds over the requested window, and nothing has been scraped yet.
 | Everything filtered by `?az=` is empty | vmagent's `external_labels` and the collector's `transform/external-labels` disagree — both must come from `global.ksgExternalLabels` |
 | Graph ids / cluster compound read `local-a-demo-ksg-demo` | expected: that is the composed identity `<az>-<env>-<cluster>` |
 | `?cluster=local-a-demo-ksg-demo` is empty | expected: `?cluster=` takes the raw name `ksg-demo`; pin with `?az=local-a&env=demo&cluster=ksg-demo` |
-| Cluster dropdown is empty | Grafana's KSM datasource (`victoriametrics-ksm`) is not answering vmauth — check `KSG_UPSTREAM_*` env on the Grafana pod |
+| Cluster / AZ / Env / Namespace controls are empty | the `/metrics-api/` proxy is not reaching vmauth, or the `Authorization` header it attaches is wrong — check `global.ksgUpstreamAuth` and the front end's nginx Secret |
+| Edge-type control is empty | `/api/v1/edge-types` is not answering through the front door |
 | Backend logs "upstream backends did not answer" right after `make up` | expected: the server is ready before either store is, and it retries |
 
 ## Requirements

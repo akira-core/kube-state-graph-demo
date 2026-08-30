@@ -1,0 +1,72 @@
+# The standalone SPA. It is a static bundle behind nginx: everything it talks to
+# it reaches through its OWN origin, because the browser must not hold the
+# metric store's credential and the backend must not have to permit a second
+# origin.
+image:
+  repository: ksg-demo/kube-state-graph-frontend
+  tag: local
+  # Never: the image is side-loaded into kind with `kind load docker-image` and
+  # exists in no registry. IfNotPresent would still work, but Never turns a
+  # missing side-load into an immediate, legible failure.
+  pullPolicy: Never
+
+replicaCount: 1
+
+# Resource names default to <release>-kube-state-graph-frontend. The umbrella
+# chart pins fullnameOverride instead, for the same reason every other component
+# here does: the name is addressed by URL from outside the chart.
+nameOverride: ''
+fullnameOverride: ''
+
+service:
+  type: ClusterIP
+  port: 80
+  # Set to expose the front door on a kind extraPortMapping.
+  nodePort: null
+
+# The nginx image listens unprivileged on 8080.
+containerPort: 8080
+
+# What the browser fetches from <origin>/config.json on every full page load.
+# Rendered verbatim into a ConfigMap — this is the demo's copy of the frontend's
+# runtime configuration, not the frontend repo's development default.
+config:
+  # false, always, in this demo. `true` renders the frontend's own bundled
+  # showcase fixture, which draws a convincing graph while proving nothing about
+  # the pipeline standing behind it.
+  demoMode: false
+  # 0 = manual reload only.
+  refreshIntervalSeconds: 0
+  defaultLayout: fcose
+  theme: system
+  endpoints:
+    # Same-origin. `proxy.graph` below is where it lands.
+    graph: /api/v1/graph
+    # Prometheus API ROOT (no /api/v1 suffix — that belongs to the API). The
+    # identity filter controls read kube_pod_info label values from here.
+    labelValues: /metrics-api
+    # The backend's edge-type catalogue, served from the same registry that
+    # validates ?edge_type=, so every option it offers is one the backend takes.
+    edgeTypes: /api/v1/edge-types
+
+# Where the two same-origin prefixes are forwarded, in-cluster.
+proxy:
+  # Everything under /api/ — the graph and the edge-type catalogue.
+  graph: http://kube-state-graph:8080
+  # Only /metrics-api/api/v1/label/ is forwarded, and only with the basic-auth
+  # credential attached server-side. Deliberately NOT the whole store: a
+  # same-origin path that proxies arbitrary PromQL with credentials attached is
+  # a worse default than one that proxies four label lookups.
+  labelValues: http://vm-auth:8427
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

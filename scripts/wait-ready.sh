@@ -6,9 +6,10 @@
 # last step waits for the backend to answer with a non-empty element set.
 set -euo pipefail
 
-ctx="${1:?usage: wait-ready.sh <kube-context> <namespace> [backend-url]}"
-ns="${2:?usage: wait-ready.sh <kube-context> <namespace> [backend-url]}"
+ctx="${1:?usage: wait-ready.sh <kube-context> <namespace> [backend-url] [frontend-url]}"
+ns="${2:?usage: wait-ready.sh <kube-context> <namespace> [backend-url] [frontend-url]}"
 backend="${3:-http://localhost:18080}"
+frontend="${4:-http://localhost:3001}"
 kubectl="kubectl --context ${ctx}"
 
 echo "==> waiting for the platform namespace (${ns})"
@@ -36,6 +37,27 @@ for workload_ns in shop platform; do
   for sts in $(${kubectl} -n "${workload_ns}" get statefulset -o name); do
     ${kubectl} -n "${workload_ns}" rollout status "${sts}" --timeout=10m
   done
+done
+
+# The front door, separately from the pipeline. /healthz reads neither the
+# config file nor the backend, so it answers as soon as nginx is serving — which
+# is exactly the signal wanted here. Without this gate `make up` can hand back a
+# URL that is still refusing connections, and the first thing anyone does with
+# this demo is open it.
+echo "==> waiting for the front door"
+deadline=$(( $(date +%s) + 180 ))
+while :; do
+  code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "${frontend}/healthz" 2>/dev/null || echo 000)
+  if [[ "${code}" == 200 ]]; then
+    echo "    ${frontend} answering"
+    break
+  fi
+  if (( $(date +%s) > deadline )); then
+    echo "    after 3 minutes ${frontend}/healthz answered HTTP ${code}" >&2
+    echo "    check: kubectl -n ${ns} logs deployment/kube-state-graph-frontend" >&2
+    exit 1
+  fi
+  sleep 5
 done
 
 # Two independent storage signals have to land, and waiting on element count

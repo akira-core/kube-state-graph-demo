@@ -17,14 +17,14 @@ dependencies:
 - name: opentelemetry-collector
   repository: https://open-telemetry.github.io/opentelemetry-helm-charts
   version: 0.170.0
-- name: grafana
-  repository: https://grafana.github.io/helm-charts
-  version: 10.5.15
 - name: csi-driver-nfs
   repository: https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
   version: 4.13.4
 - name: kube-state-graph
   repository: file://../kube-state-graph
+  version: 0.1.0
+- name: kube-state-graph-frontend
+  repository: file://../kube-state-graph-frontend
   version: 0.1.0
 - name: netapp-faker
   repository: file://../netapp-faker
@@ -35,5 +35,5 @@ dependencies:
 - name: nfs-server
   repository: file://../nfs-server
   version: 0.1.0
-digest: sha256:f22596c44f8560b4695249abe459fa3c799f4ad1837b5a7a8da7280113c41884
-generated: "2026-08-25T21:48:45.862753+08:00"
+digest: sha256:420616ec5fa5585c92b537f60b45fd24ee5ef7ed51f5a3a1c0a75bd9d88e4291
+generated: "2026-08-30T11:02:43.639927+08:00"

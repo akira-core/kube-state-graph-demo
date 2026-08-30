@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repository is
 
 An **integration repository**, not a product. It stands up `kube-state-graph`
-(Go API server) and `kube-state-graph-panel` (Grafana panel plugin) on a local
+(Go API server) and `kube-state-graph-frontend` (standalone SPA) on a local
 kind cluster, together with the whole metrics pipeline they need, and proves the
 graph draws end to end.
 
@@ -19,13 +19,13 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-panel/` are git submodules. The
-backend tracks `main`; the panel is still on a feature branch:
+`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. The
+backend tracks `main`; the front end is still on a feature branch:
 
 | Submodule | Tracked branch |
 |---|---|
 | `kube-state-graph` | `main` |
-| `kube-state-graph-panel` | `node-group-compound-parent` |
+| `kube-state-graph-frontend` | `feat/pure-ui-frontend` |
 
 Each has its own `CLAUDE.md` with its own conventions — read the relevant one
 before editing inside it. Changes inside a submodule belong to *that* repository:
@@ -37,7 +37,7 @@ the submodule — override the build source instead:
 
 ```bash
 make redeploy-backend BACKEND_SRC=../kube-state-graph
-make redeploy-panel   PANEL_SRC=../kube-state-graph-panel
+make redeploy-frontend FRONTEND_SRC=../kube-state-graph-frontend
 ```
 
 ## Commands
@@ -58,7 +58,7 @@ Iterating after `make up` — each rebuilds, re-loads into kind, and restarts:
 
 ```bash
 make redeploy-backend      # kube-state-graph
-make redeploy-panel        # panel bundle + Grafana restart
+make redeploy-frontend     # front-door SPA image + rollout
 make redeploy-workloads    # demo-app / netapp-faker image, restarts every workload
 ```
 
@@ -72,20 +72,24 @@ change works without running it.
 Host requirements: `docker`, `kind`, `kubectl`, `helm`, `jq`, `curl`, `git`. Go and
 Node are **not** needed — both builds run inside Docker.
 
-Entry points: Grafana <http://localhost:3001> (anonymous Admin), Graph API
+Entry points: the front door <http://localhost:3001> (the SPA — Graph and
+Sankey, with the filter bar), Graph API
 <http://localhost:18080/docs>, and **two** metric stores — vmselect
 <http://localhost:18481/select/0/prometheus> (Harvest, service-graph) and vmauth
 <http://localhost:18427> (kube-state-metrics, kubelet; needs
 `curl -u ksg:ksg-demo-not-a-real-secret`).
-Grafana is on 3001 so this can run beside the panel repo's own docker-compose demo.
+The front door is on 3001 so this can run beside the frontend repo's own
+`npm run dev`. **There is no Grafana** — ad-hoc PromQL goes straight to the two
+stores above, and asking the wrong one returns an empty result that looks
+exactly like a broken pipeline.
 
 ## Where things live
 
 | Path | Holds |
 |---|---|
-| `charts/ksg-demo/values.yaml` | the whole pipeline: both VM stores, vmagent, vmauth, kube-state-metrics, OTel Collector, backend, faker, Grafana. Most changes land here. Its `global` block holds the two things more than one component must agree on: the cluster/az/env external labels and the vmauth credential |
+| `charts/ksg-demo/values.yaml` | the whole pipeline: both VM stores, vmagent, vmauth, kube-state-metrics, OTel Collector, backend, faker, front end. Most changes land here. Its `global` block holds the two things more than one component must agree on: the cluster/az/env external labels and the vmauth credential |
 | `charts/demo-workloads/values.yaml` | the estate the graph is a picture of — 7 workloads across `shop` / `platform` |
-| `charts/kube-state-graph/`, `charts/netapp-faker/`, `charts/nfs-server/` | local charts for the three first-party deployments. `nfs-server` is one Ganesha process exporting a single directory — no upstream chart exports a writable share without also being a provisioner, and a provisioner's Ganesha only exports directories it created for its own PVs |
+| `charts/kube-state-graph/`, `charts/kube-state-graph-frontend/`, `charts/netapp-faker/`, `charts/nfs-server/` | local charts for the four first-party deployments. `kube-state-graph-frontend` holds the SPA's `config.json` and the replacement `nginx.conf` (a Secret — it embeds the vmauth header). `nfs-server` is one Ganesha process exporting a single directory — no upstream chart exports a writable share without also being a provisioner, and a provisioner's Ganesha only exports directories it created for its own PVs |
 | `tools/cmd/demo-app` | one binary playing every workload role; role is entirely env config |
 | `tools/cmd/netapp-faker` | the only fake component — discovers PVCs from the store holding the ksm families (through vmauth, so it carries basic auth), renders ONTAP series into the other store |
 | `scripts/verify.sh` | one check per pipeline precondition, in data-flow order |
@@ -130,9 +134,22 @@ every URL that names it.
 is not live until it is both re-loaded and rolled out — that is what the
 `redeploy-*` targets do.
 
-**Dashboards are authored here.** `charts/ksg-demo/dashboards/ksg-demo.json` is
-tracked source. Bring-up must not replace it from the panel submodule — that
-tree no longer publishes a backend-backed dashboard, only a generated fixture.
+**The front door's runtime config is authored here.** The SPA fetches
+`<origin>/config.json` on every full page load;
+`charts/kube-state-graph-frontend/values.yaml` is that file's tracked source and
+it is mounted as a ConfigMap DIRECTORY (never `subPath`, which would not follow
+updates). It must keep `demoMode: false` — `true` renders the frontend's own
+bundled showcase fixture, a convincing graph that proves nothing about the
+pipeline behind it.
+
+**The browser talks only to the front door's own origin.** The chart replaces
+the image's `/etc/nginx/nginx.conf` wholesale (the override point that image
+documents) with one carrying two proxies: `/api/` to `kube-state-graph:8080`,
+and `/metrics-api/api/v1/label/` to `vm-auth:8427` with the basic-auth header
+attached in-cluster. The credential therefore never reaches a browser, and the
+backend needs no CORS policy. Do **not** also set `KSG_API_PROXY_TARGET`: that
+makes the image's entrypoint write a second `location /api/`, and nginx refuses
+to start on a duplicate location.
 
 **Chart dependencies are vendored unpacked, and `make deps` is offline.** The
 upstream subcharts live under `charts/ksg-demo/charts/` as tracked
@@ -187,7 +204,7 @@ Before changing any of these, know what it removes:
   rejects a half-declared pair, and treats a named-but-unset variable as a load
   failure rather than falling back to no credentials. The demo credential lives
   once in `global.ksgUpstreamAuth` and reaches vmauth, the backend, the faker
-  and Grafana's KSM datasource from there.
+  and the front door's nginx from there.
 - **`translation_strategy: UnderscoreEscapingWithoutSuffixes`** stops
   `traces_service_graph_request_total` becoming `..._total_total`. The cost is the
   latency histogram losing its `_seconds`, which `transform/servicegraph-names`
@@ -223,23 +240,33 @@ Before changing any of these, know what it removes:
 - **`netapp-nas` must be a CSI volume that implements `NodeGetVolumeStats`.**
   kind's local-path (hostPath) PVs produce no `kubelet_volume_stats_*`. The
   demo uses `csi-driver-nfs` against the in-cluster Ganesha export.
-- **Every backend URL in a provisioned dashboard must still exist, and every
-  parameter it sends must still be honoured.** A removed `/v1/...` path empties a
-  dropdown and leaves the graph drawing, which is the failure this demo exists to
-  catch. A *withdrawn parameter* is the same failure one layer in and harder to
-  see: the backend ignores unknown parameters without error, so the control
-  populates, accepts a selection, and moves nothing. `?name=` was exactly that and
-  the control is gone. `cluster` / `az` / `env` / `namespace` are sourced from
-  `kube_pod_info` on the **single-node store** (Grafana datasource
-  `victoriametrics-ksm` → vmauth), never from the graph API's `clusters[]`
-  (those are composed identities, not valid `?cluster=` values) and never from
-  the cluster-store Prometheus datasource (`victoriametrics` → vmselect), which
-  holds no `kube_pod_info`.
-- **The dashboard's `Projection` control is the backend's `?prune=`.** Its default,
+- **Every backend URL the front door calls must still exist, and every parameter
+  it sends must still be honoured.** A removed `/v1/...` path empties a control
+  and leaves the graph drawing, which is the failure this demo exists to catch. A
+  *withdrawn parameter* is the same failure one layer in and harder to see: the
+  backend ignores unknown parameters without error, so the control populates,
+  accepts a selection, and moves nothing. `?name=` was exactly that and the
+  control is gone. `verify.sh` §10 therefore requests the graph **through the
+  front door's own origin**, not against the backend directly — proxying is part
+  of what is under test and a 404 there is invisible from the backend side.
+- **`cluster` / `az` / `env` / `namespace` options come from `kube_pod_info` on
+  the single-node store**, reached at `/metrics-api/api/v1/label/<name>/values`
+  through the front door's nginx. Never from the graph API's `clusters[]` (those
+  are composed `<az>-<env>-<cluster>` identities, not valid `?cluster=` values —
+  feeding one back returns an empty 200) and never from the cluster store, which
+  holds no `kube_pod_info`. `edge_type` options come from `/v1/edge-types`, the
+  same registry the backend validates that parameter against, so an unregistered
+  value cannot be offered — it would be a 400, not a narrowed graph.
+- **The window is built per request, not configured.** `/v1/graph` requires an
+  absolute `start` and `end` and has no relative form, so the front end resolves
+  its time selection at request time. A window baked into `endpoints.graph` would
+  stop moving and eventually fall outside retention, returning an empty graph that
+  looks exactly like a broken pipeline.
+- **The `Projection` control is the backend's `?prune=`.** Its default,
   `Traffic graph` (`prune=true`), draws only workload sitting on a connectivity
   edge — 8 of the demo's 38 pods. `scripts/verify.sh` and `scripts/wait-ready.sh`
-  request `prune=false`, so the harness and the panel agree only in the
-  `Full inventory` position. A panel showing fewer pods than `make verify` counts
+  request `prune=false`, so the harness and the front door agree only in the
+  `Full inventory` position. A UI showing fewer pods than `make verify` counts
   is the prune, not a broken pipeline.
 - **The storage join is exactly one equality**:
   `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name`.
@@ -274,7 +301,10 @@ A demo where everything is green teaches nothing. These are intentional:
    what breaks when it is empty. Start here, always.
 2. An empty graph in the first minute after `make up` is expected: the backend
    builds over a window and nothing has been scraped yet. `make wait` blocks on
-   **two** storage signals, because neither implies the other: a
+   the front door answering `/healthz` — that path reads neither the config file
+   nor the backend, so it separates "the server is down" from "the pipeline is
+   down" — and then on **two** storage signals, because neither implies the
+   other: a
    `pvc-to-netapp-aggr` edge (the longest chain — kube-state-metrics through the
    faker's discovery and back) **and** kubelet usage on every claim that joined
    (the CSI leg). The faker never reads a kubelet, so the join completes while
@@ -285,12 +315,14 @@ A demo where everything is green teaches nothing. These are intentional:
    the join alone let `make up` return two minutes early and `make verify` fail
    three checks that were merely not-yet.
 3. Cross-check with raw PromQL when the graph disagrees with what you think the
-   metrics say — and ask the RIGHT store. `kube_*` and `kubelet_*` are at
-   <http://localhost:18427> behind basic auth; `volume_labels`, the `qos_*` /
-   `aggr_*` families and `traces_service_graph_*` are at
-   <http://localhost:18481/select/0/prometheus>. A query sent to the wrong one
-   returns an empty result that looks exactly like a broken pipeline, which is
-   why every `verify.sh` section header names its store.
+   metrics say — and ask the RIGHT store. There is no Grafana to explore from, so
+   go to the stores directly. `kube_*` and `kubelet_*` are at
+   <http://localhost:18427> behind basic auth
+   (`curl -sG -u ksg:ksg-demo-not-a-real-secret http://localhost:18427/api/v1/query --data-urlencode 'query=kube_pod_info'`);
+   `volume_labels`, the `qos_*` / `aggr_*` families and `traces_service_graph_*`
+   are at <http://localhost:18481/select/0/prometheus>, unauthenticated. A query
+   sent to the wrong one returns an empty result that looks exactly like a broken
+   pipeline, which is why every `verify.sh` section header names its store.
 4. `kube_state_graph_backend_query_failures_total{backend}` on the backend's
    `/metrics` is cumulative since process start, and a cold bring-up always puts
    tens of connection-refused errors in it: the server is ready before either

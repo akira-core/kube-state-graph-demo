@@ -2,7 +2,7 @@ apiVersion: v2
 name: ksg-demo
 description: >-
   The whole kube-state-graph demo in one release: a synthetic Kubernetes estate,
-  the metrics pipeline that describes it, and the Grafana panel that draws it.
+  the metrics pipeline that describes it, and the standalone SPA that draws it.
 type: application
 version: 0.1.0
 appVersion: demo
@@ -56,10 +56,6 @@ dependencies:
     version: 0.170.0
     repository: https://open-telemetry.github.io/opentelemetry-helm-charts
 
-  - name: grafana
-    version: 10.5.15
-    repository: https://grafana.github.io/helm-charts
-
   # Implements NodeGetVolumeStats, which is the only way the kubelet reports
   # kubelet_volume_stats_* for volumes that are not hostPath.
   - name: csi-driver-nfs
@@ -69,6 +65,12 @@ dependencies:
   - name: kube-state-graph
     version: 0.1.0
     repository: file://../kube-state-graph
+
+  # The demo's front door: the standalone SPA, served by nginx, reaching the
+  # backend and the pod-inventory store through its own origin.
+  - name: kube-state-graph-frontend
+    version: 0.1.0
+    repository: file://../kube-state-graph-frontend
 
   - name: netapp-faker
     version: 0.1.0

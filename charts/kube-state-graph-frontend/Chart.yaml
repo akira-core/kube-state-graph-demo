@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kube-state-graph-frontend
+description: The standalone kube-state-graph SPA — the demo's front door, served by nginx.
+type: application
+version: 0.1.0
+appVersion: demo
