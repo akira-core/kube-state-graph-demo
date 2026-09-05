@@ -20,7 +20,9 @@ BACKEND="${2:-http://localhost:18080}"
 VMAUTH="${3:-http://localhost:18427}"
 VMAUTH_USER="${4:-ksg}"
 VMAUTH_PASS="${5:-ksg-demo-not-a-real-secret}"
-GRAFANA="${6:-http://localhost:3001}"
+# The front door. Sections 10 and 11 go THROUGH it rather than straight to the
+# backend or the store, because the same-origin proxying is itself under test.
+FRONTEND="${6:-http://localhost:3001}"
 
 # Must match global.ksgExternalLabels. The backend composes
 # <az>-<env>-<cluster> as the identity; ?cluster= still takes the raw name.
@@ -154,6 +156,34 @@ query "volume_labels"                 'volume_labels'                           
 query "qos_read_ops"                  'qos_read_ops'                                         "storage edges exist but carry no I/O"
 query "qos policy ceiling"            'qos_policy_fixed_max_throughput_iops'                 "storage edges carry no declared ceiling"
 query "aggr_space_used"               'aggr_space_used'                                      "aggregates show no usage fill"
+query "node_labels (hardware)"        'node_labels{model!=""}'                               "controllers carry no data.hardware — no model, serial or version"
+query "node_cpu_busy"                 'node_cpu_busy'                                        "controllers carry no data.perf.cpu_busy_pct"
+query "node_total_ops"                'node_total_ops'                                       "controllers carry no data.perf.total_ops"
+query "node_total_latency"            'node_total_latency'                                   "controllers carry no data.perf.total_latency_us"
+query "node_total_data"               'node_total_data'                                      "controllers carry no data.perf.total_bytes_per_sec"
+# Both aggregates must carry claims. They used to be assigned by hashing the PV
+# name, which let all three land on one and left the other controller drawn with
+# no flow through it — a Sankey with a dead tier, and nothing in the pipeline
+# saying so.
+query_expr "every aggregate carries a volume" \
+  'count(count by (aggr) (last_over_time(volume_labels{aggr!=""}['"${WINDOW}"']))) == 2' \
+  "the claims are not spread across both aggregates — one controller draws with no flow"
+
+echo
+echo "== 6b. the alert overlay's producer (CLUSTER store) =="
+# vmalert evaluates over the Harvest families and writes ALERTS back. Without
+# it the `alerts` family is served but permanently empty, which is
+# indistinguishable from a healthy estate — the one thing the overlay exists to
+# tell apart.
+query "ALERTS firing"                 'ALERTS{alertstate="firing"}'                          "the alert overlay has nothing to overlay"
+query "controller alert carries node" 'ALERTS{alertstate="firing",alertname="NetAppControllerDegraded",node!=""}' "the controller alert cannot resolve to a netapp-node"
+query "aggregate alert carries aggr"  'ALERTS{alertstate="firing",alertname="NetAppAggregateFilling",aggr!=""}'   "the aggregate alert cannot resolve to a netapp-aggr"
+# The `alerts` family accepts az / env matchers, so an ALERTS series missing
+# them drops out of every filtered request — including the ?az= / ?env= that
+# /v1/storage-graph REQUIRES. They are inherited from the expression output,
+# never stamped by vmalert, which is why the rules are written over series that
+# already carry them.
+query "ALERTS inherits az / env"      'ALERTS{alertstate="firing",az="'"${KSG_AZ}"'",env="'"${KSG_ENV}"'"}' "alerts vanish from every ?az= / ?env= request"
 echo
 echo "== 7. the split is real, and the join spans it =="
 # This used to be one PromQL expression joining volume_labels to
@@ -161,23 +191,44 @@ echo "== 7. the split is real, and the join spans it =="
 # now live in different stores, and no single store can join across them. That
 # is the whole point — assembling this join is kube-state-graph's job, and
 # section 9 asserts the edge it produces. Here we only prove the two halves
-# exist, on the two sides, and refer to the same PV names.
+# exist, on the two sides, and that one derives onto the other.
+#
+# The join is derive-then-match, NOT equality. An ONTAP volume name admits only
+# letters, digits and `_`, so it can never equal a `pvc-<uuid>` PV name: the
+# backend rewrites `-` to `_` and SUFFIX-matches the token against the stock
+# Harvest `volume` label, which is why it never has to be told the
+# provisioner's storagePrefix. The two greps below reproduce exactly that
+# default derivation — a check comparing the two sides for equality would be
+# asserting a join the backend does not perform.
 
-harvest_pvs=$(curl -sS --max-time 20 --get "${VMSELECT}/api/v1/query" \
+harvest_vols=$(curl -sS --max-time 20 --get "${VMSELECT}/api/v1/query" \
   --data-urlencode "query=last_over_time(volume_labels[${WINDOW}])" 2>/dev/null \
-  | jq -r '.data.result[]?.metric.volume_name // empty' | sort -u)
+  | jq -r '.data.result[]?.metric.volume // empty' | sort -u)
 
-k8s_pvs=$(curl -sS --max-time 20 --user "${VMAUTH_USER}:${VMAUTH_PASS}" \
+k8s_tokens=$(curl -sS --max-time 20 --user "${VMAUTH_USER}:${VMAUTH_PASS}" \
   --get "${VMAUTH}/api/v1/query" \
   --data-urlencode "query=last_over_time(kube_persistentvolumeclaim_info{volumename!=\"\"}[${WINDOW}])" 2>/dev/null \
-  | jq -r '.data.result[]?.metric.volumename // empty' | sort -u)
+  | jq -r '.data.result[]?.metric.volumename // empty' | tr '-' '_' | sort -u)
 
-shared=$(comm -12 <(printf '%s\n' "${harvest_pvs}") <(printf '%s\n' "${k8s_pvs}") | grep -c . || true)
+# Claims whose derived token is the suffix of at least one FlexVol name. Plain
+# bash `case` globbing rather than grep, so a token is never re-read as a
+# pattern.
+shared=0
+while IFS= read -r token; do
+  [[ -n "${token}" ]] || continue
+  while IFS= read -r vol; do
+    [[ -n "${vol}" ]] || continue
+    case "${vol}" in
+      *"${token}") shared=$((shared + 1)); break ;;
+    esac
+  done <<<"${harvest_vols}"
+done <<<"${k8s_tokens}"
+
 if [[ "${shared}" -gt 0 ]]; then
-  check "volume_name joins a real PV across stores" yes "${shared} PV names in both stores"
+  check "the derived volume key joins a real PV" yes "${shared} claims match a FlexVol name"
 else
-  check "volume_name joins a real PV across stores" no \
-    "the fake estate hangs off nothing ($(grep -c . <<<"${harvest_pvs}") harvest / $(grep -c . <<<"${k8s_pvs}") k8s PV names)"
+  check "the derived volume key joins a real PV" no \
+    "the fake estate hangs off nothing ($(grep -c . <<<"${harvest_vols}") FlexVol / $(grep -c . <<<"${k8s_tokens}") claim names)"
 fi
 
 # Negative proofs that the two stores hold DIFFERENT things. Without these, a
@@ -371,94 +422,197 @@ else
     check "?cluster=<identity> is empty (not a filter value)" no \
       "${identity_nodes} nodes / clusters ${identity_clusters} — identity leaked into ?cluster="
   fi
+
+  # The three optional NetApp legs, asserted on the BODY rather than on the
+  # series: each degrades log-and-continue, so a leg that never reached the
+  # graph looks upstream-identical to one that was never rendered.
+  hw=$(jq '[.elements.nodes[] | select(.data.type == "netapp-node" and (.data.hardware.model // "") != "")] | length' <<<"${graph}")
+  check "netapp-node carries data.hardware" "$( [[ "${hw}" != "0" ]] && echo yes || echo no )" \
+    "${hw} controllers name a model (node_labels)"
+
+  perf=$(jq '[.elements.nodes[] | select(.data.type == "netapp-node" and .data.perf.cpu_busy_pct != null)] | length' <<<"${graph}")
+  check "netapp-node carries data.perf" "$( [[ "${perf}" != "0" ]] && echo yes || echo no )" \
+    "${perf} controllers report cpu_busy_pct (system_node)"
+
+  # The overlay's whole job: an alert firing upstream has to arrive ATTACHED to
+  # the node its labels name, not merely exist in the store.
+  alerted=$(jq '[.elements.nodes[] | select((.data.alerts // []) | length > 0)] | length' <<<"${graph}")
+  check "alerts attach to graph nodes" "$( [[ "${alerted}" != "0" ]] && echo yes || echo no )" \
+    "${alerted} nodes carry data.alerts"
+
+  ctrl_alert=$(jq '[.elements.nodes[] | select(.data.type == "netapp-node") | (.data.alerts // [])[] | select(.name == "NetAppControllerDegraded")] | length' <<<"${graph}")
+  check "controller alert lands on the netapp-node" "$( [[ "${ctrl_alert}" != "0" ]] && echo yes || echo no )" \
+    "${ctrl_alert} matched — a {cluster,node} alert resolving to the ONTAP side"
+
+  # `aggr` outranks `node` in the overlay's kind precedence. The stock aggr_*
+  # series carry both, so a regression here puts every aggregate alert one tier
+  # up on the controller instead.
+  aggr_alert=$(jq '[.elements.nodes[] | select(.data.type == "netapp-aggr") | (.data.alerts // [])[] | select(.name == "NetAppAggregateFilling")] | length' <<<"${graph}")
+  check "aggregate alert lands on the netapp-aggr" "$( [[ "${aggr_alert}" != "0" ]] && echo yes || echo no )" \
+    "${aggr_alert} matched — aggr outranks node"
 fi
 
 echo
-echo "== 10. provisioned dashboard backend URLs resolve =="
-# Every /v1 path the authored dashboard still calls. Relative URLs are
-# against the Infinity datasource (the graph API). A 404 here is the
-# silent-dropdown failure this check exists to catch.
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dash_dir="${repo_root}/charts/ksg-demo/dashboards"
-if [[ ! -d "${dash_dir}" ]]; then
-  printf '  \033[31mFAIL\033[0m  %s\n' "charts/ksg-demo/dashboards/ is missing"
-  fail=$((fail + 1))
+echo "== 10. the front door serves its config and reaches the backend through itself =="
+# The SPA fetches <origin>/config.json on every full page load and then asks for
+# exactly what that file names. Both halves are asserted here, and the graph
+# request goes through the FRONT DOOR's origin, not straight to the backend:
+# a 404 from the proxy is the empty-canvas failure this demo exists to catch,
+# and it is invisible from the backend side.
+code=$(curl -sS --max-time 20 -o /tmp/ksg-verify-config.json -w '%{http_code}' \
+  "${FRONTEND}/config.json" 2>/dev/null || echo 000)
+if [[ "${code}" == 200 ]] && jq -e . /tmp/ksg-verify-config.json >/dev/null 2>&1; then
+  check "front door serves a parseable /config.json" yes "HTTP ${code}"
 else
-  dash_paths=$(grep -RhoE '/v1/[A-Za-z0-9_/-]+' "${dash_dir}" | sort -u)
-  if [[ -z "${dash_paths}" ]]; then
-    printf '  \033[31mFAIL\033[0m  %s\n' "no /v1 paths found in provisioned dashboards"
-    fail=$((fail + 1))
-  fi
-  while IFS= read -r path; do
-    [[ -n "${path}" ]] || continue
-    url="${BACKEND}${path}"
-    if [[ "${path}" == "/v1/graph" ]]; then
-      url="${url}?start=$(( now - 300 ))&end=${now}"
-    fi
-    code=$(curl -sS --max-time 20 -o /tmp/ksg-verify-dash.body -w '%{http_code}' "${url}" 2>/dev/null || echo 000)
-    if [[ "${code}" != 200 ]]; then
-      printf '  \033[31mFAIL\033[0m  %-46s HTTP %s\n' "${path}" "${code}"
-      fail=$((fail + 1))
-    else
-      printf '  \033[32m ok \033[0m  %-46s HTTP %s\n' "${path}" "${code}"
-      pass=$((pass + 1))
-    fi
-  done <<<"${dash_paths}"
+  check "front door serves a parseable /config.json" no \
+    "HTTP ${code} — the ConfigMap is not mounted, or nginx is not serving /srv/config"
+fi
 
-  # Cluster / az / env / namespace MUST query kube_pod_info on the KSM
-  # datasource (single-node store). The cluster-store uid has no kube_pod_info,
-  # and clusters[] is the composed identity — neither is a valid ?cluster= value.
-  dash_json="${dash_dir}/ksg-demo.json"
-  if [[ -f "${dash_json}" ]]; then
-    graph_url=$(jq -r '.panels[0].targets[0].url // empty' "${dash_json}")
-    if [[ "${graph_url}" == *'${az:customqueryparam:az:}'* && \
-          "${graph_url}" == *'${cluster:customqueryparam:cluster:}'* && \
-          "${graph_url}" == *'${env:customqueryparam:env:}'* ]]; then
-      check "graph URL sends az + env + cluster" yes "identity triple is request-shaped"
-    else
-      check "graph URL sends az + env + cluster" no \
-        "missing a customqueryparam — pinning one identity needs all three"
-    fi
-    for var in cluster az env namespace; do
-      uid=$(jq -r --arg n "${var}" \
-        '.templating.list[] | select(.name == $n) | .datasource.uid // empty' \
-        "${dash_json}")
-      query=$(jq -r --arg n "${var}" \
-        '.templating.list[] | select(.name == $n) | .query // empty' \
-        "${dash_json}")
-      if [[ "${uid}" == "victoriametrics-ksm" && "${query}" == "label_values(kube_pod_info, ${var})" ]]; then
-        check "dashboard \$${var} reads kube_pod_info via KSM store" yes "uid=${uid}"
-      else
-        check "dashboard \$${var} reads kube_pod_info via KSM store" no \
-          "uid=${uid:-<missing>} query=${query:-<missing>}"
-      fi
-    done
+if jq -e '.demoMode == false' /tmp/ksg-verify-config.json >/dev/null 2>&1; then
+  check "front door is NOT in demo mode" yes "demoMode=false"
+else
+  check "front door is NOT in demo mode" no \
+    "demoMode is not false — the SPA would draw its own bundled fixture, which proves nothing"
+fi
+
+# Health does not read the config or the backend, so it separates "the server is
+# down" from "the pipeline is down".
+code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "${FRONTEND}/healthz" 2>/dev/null || echo 000)
+check "front door answers /healthz" "$( [[ "${code}" == 200 ]] && echo yes || echo no )" "HTTP ${code}"
+
+graph_path=$(jq -r '.endpoints.graph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -z "${graph_path}" ]]; then
+  check "config names a graph endpoint" no "endpoints.graph is absent — the SPA cannot load at all"
+else
+  # Unpruned, like every other graph request this script makes: the default
+  # projection returns only connectivity-connected workload, and this script
+  # counts the inventory.
+  code=$(curl -sS --max-time 30 -o /tmp/ksg-verify-fe-graph.json -w '%{http_code}' \
+    "${FRONTEND}${graph_path}?start=$(( now - 300 ))&end=${now}&prune=false" 2>/dev/null || echo 000)
+  elems=$(jq '(.elements.nodes | length) + (.elements.edges | length)' /tmp/ksg-verify-fe-graph.json 2>/dev/null || echo 0)
+  if [[ "${code}" == 200 ]] && [[ "${elems}" =~ ^[0-9]+$ ]] && (( elems > 0 )); then
+    check "graph answers through the front door (${graph_path})" yes "HTTP ${code}, ${elems} elements"
+  else
+    check "graph answers through the front door (${graph_path})" no \
+      "HTTP ${code}, ${elems} elements — nginx /api/ is not reaching kube-state-graph"
+  fi
+fi
+
+# The Sankey's own endpoint, and the second thing the front door proxies to the
+# backend. It is asserted separately from the graph because it can fail on its
+# own in two ways the graph never would: it is the only endpoint requiring a
+# SINGLE ?az= and ?env= (both absent or repeated is a 400, not a wider answer),
+# and its body is a storage-flow DAG whose tiers each have to be present for the
+# diagram to draw. A response that is 200 but missing a tier renders as a Sankey
+# with a gap, which looks like an estate fact rather than a broken pipeline.
+storage_path=$(jq -r '.endpoints.storageGraph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -z "${storage_path}" ]]; then
+  check "config names a storage-graph endpoint" no \
+    "endpoints.storageGraph is absent — the Sankey view is disabled and shows its empty state"
+else
+  code=$(curl -sS --max-time 30 -o /tmp/ksg-verify-storage.json -w '%{http_code}' \
+    "${FRONTEND}${storage_path}?start=$(( now - 900 ))&end=${now}&az=${KSG_AZ}&env=${KSG_ENV}" 2>/dev/null || echo 000)
+  if [[ "${code}" == 200 ]]; then
+    check "storage graph answers through the front door (${storage_path})" yes "HTTP ${code}"
+  else
+    check "storage graph answers through the front door (${storage_path})" no \
+      "HTTP ${code} — nginx /api/ is not reaching /v1/storage-graph, or az/env were rejected"
+  fi
+
+  # Every hop of the fixed tier chain. A missing tier is a Sankey that stops
+  # short, and each one breaks for its own reason: node-aggr is the Harvest
+  # aggregate leg, svm-pvc is the cross-store volume join, pod-node is kubelet.
+  missing=""
+  for tier in node-aggr aggr-svm svm-pvc pvc-pod pod-node; do
+    n=$(jq --arg t "${tier}" '[.elements.edges[]? | select(.data.labels.tier == $t)] | length' \
+      /tmp/ksg-verify-storage.json 2>/dev/null || echo 0)
+    [[ "${n}" == "0" || "${n}" == "null" ]] && missing="${missing} ${tier}"
+  done
+  if [[ -z "${missing}" ]]; then
+    tiers=$(jq '[.elements.edges[]? | select(.data.labels.tier != null)] | length' /tmp/ksg-verify-storage.json)
+    check "storage-flow chain is complete (all 5 tiers)" yes "${tiers} storage-flow edges"
+  else
+    check "storage-flow chain is complete (all 5 tiers)" no \
+      "no edges on tier(s):${missing} — the Sankey draws with a gap"
+  fi
+
+  # The flow weights are what give a Sankey link its width, and they must
+  # conserve tier to tier. Comparing the top hop against the claim hop is the
+  # cheapest end-to-end statement of that: they are summed over different edge
+  # sets and can only agree if every claim's I/O rode the whole chain.
+  top=$(jq '[.elements.edges[]? | select(.data.labels.tier == "node-aggr") | .data.metrics.read_ops // 0] | add // 0' /tmp/ksg-verify-storage.json)
+  leaf=$(jq '[.elements.edges[]? | select(.data.labels.tier == "svm-pvc") | .data.metrics.read_ops // 0] | add // 0' /tmp/ksg-verify-storage.json)
+  # Not an equality: the figures are summed over different edge sets and each
+  # is rounded to 6 significant digits, so they agree to within rounding rather
+  # than bit for bit. 0.1% is far tighter than a dropped claim (33% here) and
+  # far looser than that rounding.
+  conserved=$(jq -n --argjson a "${top}" --argjson b "${leaf}" \
+    '$a > 0 and (($a - $b) | fabs) < ($a * 0.001)')
+  summary=$(jq -rn --argjson a "${top}" --argjson b "${leaf}" \
+    '"node-aggr \($a | .*100 | round / 100) vs svm-pvc \($b | .*100 | round / 100) read_ops"')
+  if [[ "${conserved}" == "true" ]]; then
+    check "flow weights conserve tier to tier" yes "${summary}"
+  else
+    check "flow weights conserve tier to tier" no \
+      "${summary} — the summation does not carry through"
+  fi
+fi
+
+# The catalogue that validates ?edge_type=. The SPA populates its edge-type
+# control from it, so a control offering a value this does not list would be a
+# 400 rather than a narrowed graph.
+edge_path=$(jq -r '.endpoints.edgeTypes // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -n "${edge_path}" ]]; then
+  types=$(curl -sS --max-time 20 "${FRONTEND}${edge_path}" 2>/dev/null | jq -r '[.edge_types[].type] | length' 2>/dev/null || echo 0)
+  if [[ "${types}" =~ ^[0-9]+$ ]] && (( types > 0 )); then
+    check "edge-type catalogue answers through the front door" yes "${types} registered types"
+  else
+    check "edge-type catalogue answers through the front door" no \
+      "no types returned — the edge-type control would be empty"
   fi
 fi
 
 echo
-echo "== 11. Grafana Cluster dropdown sees the raw name =="
-# Live proof the provisioned KSM datasource actually answers. A 401 here is
-# envValueFrom not reaching Grafana; empty values is the uid still pointing
-# at the cluster store.
-ds=$(curl -sS --max-time 20 "${GRAFANA}/api/datasources/uid/victoriametrics-ksm" 2>/dev/null || true)
-if jq -e '.uid == "victoriametrics-ksm"' <<<"${ds}" >/dev/null 2>&1; then
-  check "Grafana KSM datasource is provisioned" yes "$(jq -r '.url' <<<"${ds}")"
+echo "== 11. filter options come from the SINGLE-NODE store, through the front door =="
+# The four identity controls read kube_pod_info label values. They must reach
+# the store that HOLDS that family (single-node, behind vmauth) and they must
+# offer the RAW cluster name: the graph response's clusters[] is the composed
+# <az>-<env>-<cluster> identity, and feeding that back as ?cluster= returns an
+# empty 200 — a filter that appears to work and moves nothing.
+#
+# The credential is attached by the front door's nginx, in-cluster. This curl
+# deliberately sends none: if it needed one, so would the browser.
+lv_base=$(jq -r '.endpoints.labelValues // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -z "${lv_base}" ]]; then
+  check "config names a label-values endpoint" no \
+    "endpoints.labelValues is absent — the identity controls would be empty"
 else
-  check "Grafana KSM datasource is provisioned" no \
-    "GET /api/datasources/uid/victoriametrics-ksm failed — helm values not applied?"
-fi
+  for dim in cluster az env namespace; do
+    body=$(curl -sS --max-time 20 \
+      "${FRONTEND}${lv_base}/api/v1/label/${dim}/values?match[]=kube_pod_info" 2>/dev/null || true)
+    count=$(jq -r '.data | length' <<<"${body}" 2>/dev/null || echo 0)
+    if jq -e '.status == "success"' <<<"${body}" >/dev/null 2>&1 && [[ "${count}" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+      check "\$${dim} options via the front door" yes "$(jq -c '.data' <<<"${body}")"
+    else
+      check "\$${dim} options via the front door" no \
+        "$(jq -c '.' <<<"${body}" 2>/dev/null || echo "unreadable") — no credential attached, or the wrong store"
+    fi
+  done
 
-labels=$(curl -sS --max-time 20 \
-  "${GRAFANA}/api/datasources/proxy/uid/victoriametrics-ksm/api/v1/label/cluster/values?match[]=kube_pod_info" \
-  2>/dev/null || true)
-if jq -e --arg raw "${KSG_CLUSTER_RAW}" '.status == "success" and (.data | index($raw) != null)' \
-    <<<"${labels}" >/dev/null 2>&1; then
-  check "Cluster dropdown offers ${KSG_CLUSTER_RAW}" yes \
-    "$(jq -c '.data' <<<"${labels}")"
-else
-  check "Cluster dropdown offers ${KSG_CLUSTER_RAW}" no \
-    "$(jq -c '.' <<<"${labels}" 2>/dev/null || echo "unreadable") — dropdown would be empty"
+  clusters=$(curl -sS --max-time 20 \
+    "${FRONTEND}${lv_base}/api/v1/label/cluster/values?match[]=kube_pod_info" 2>/dev/null || true)
+  if jq -e --arg raw "${KSG_CLUSTER_RAW}" '.data | index($raw) != null' <<<"${clusters}" >/dev/null 2>&1; then
+    check "cluster control offers the raw ${KSG_CLUSTER_RAW}" yes "$(jq -c '.data' <<<"${clusters}")"
+  else
+    check "cluster control offers the raw ${KSG_CLUSTER_RAW}" no \
+      "$(jq -c '.data' <<<"${clusters}" 2>/dev/null || echo "unreadable") — the control would select nothing"
+  fi
+  if jq -e --arg id "${KSG_CLUSTER_IDENTITY}" '.data | index($id) == null' <<<"${clusters}" >/dev/null 2>&1; then
+    check "cluster control does NOT offer ${KSG_CLUSTER_IDENTITY}" yes "composed identity absent, as it must be"
+  else
+    check "cluster control does NOT offer ${KSG_CLUSTER_IDENTITY}" no \
+      "the composed identity is being offered as a filter value — it matches no series"
+  fi
 fi
 
 echo
