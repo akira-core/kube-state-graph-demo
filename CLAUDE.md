@@ -19,13 +19,19 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. The
-backend tracks `main`; the front end is still on a feature branch:
+`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. BOTH
+are currently on feature branches — the storage-flow work (`/v1/storage-graph`
+and the Sankey that draws it) is unmerged on both sides, and this demo is
+pinned to it:
 
 | Submodule | Tracked branch |
 |---|---|
-| `kube-state-graph` | `main` |
+| `kube-state-graph` | `feat/netapp-storage-graph-api-openspec` |
 | `kube-state-graph-frontend` | `feat/pure-ui-frontend` |
+
+Move the backend back to `main` once that branch merges; the pointer is a
+commit SHA either way, so `branch` only affects
+`git submodule update --remote`.
 
 Each has its own `CLAUDE.md` with its own conventions — read the relevant one
 before editing inside it. Changes inside a submodule belong to *that* repository:
@@ -72,8 +78,8 @@ change works without running it.
 Host requirements: `docker`, `kind`, `kubectl`, `helm`, `jq`, `curl`, `git`. Go and
 Node are **not** needed — both builds run inside Docker.
 
-Entry points: the front door <http://localhost:3001> (the SPA — Graph and
-Sankey, with the filter bar), Graph API
+Entry points: the front door <http://localhost:3001> (the SPA — Graph, from
+`/v1/graph`, and Sankey, from `/v1/storage-graph`), Graph API
 <http://localhost:18080/docs>, and **two** metric stores — vmselect
 <http://localhost:18481/select/0/prometheus> (Harvest, service-graph) and vmauth
 <http://localhost:18427> (kube-state-metrics, kubelet; needs
@@ -87,11 +93,11 @@ exactly like a broken pipeline.
 
 | Path | Holds |
 |---|---|
-| `charts/ksg-demo/values.yaml` | the whole pipeline: both VM stores, vmagent, vmauth, kube-state-metrics, OTel Collector, backend, faker, front end. Most changes land here. Its `global` block holds the two things more than one component must agree on: the cluster/az/env external labels and the vmauth credential |
+| `charts/ksg-demo/values.yaml` | the whole pipeline: both VM stores, vmagent, vmauth, vmalert (the alerting rules the overlay reads), kube-state-metrics, OTel Collector, backend, faker, front end. Most changes land here. Its `global` block holds the two things more than one component must agree on: the cluster/az/env external labels and the vmauth credential |
 | `charts/demo-workloads/values.yaml` | the estate the graph is a picture of — 7 workloads across `shop` / `platform` |
 | `charts/kube-state-graph/`, `charts/kube-state-graph-frontend/`, `charts/netapp-faker/`, `charts/nfs-server/` | local charts for the four first-party deployments. `kube-state-graph-frontend` holds the SPA's `config.json` and the replacement `nginx.conf` (a Secret — it embeds the vmauth header). `nfs-server` is one Ganesha process exporting a single directory — no upstream chart exports a writable share without also being a provisioner, and a provisioner's Ganesha only exports directories it created for its own PVs |
 | `tools/cmd/demo-app` | one binary playing every workload role; role is entirely env config |
-| `tools/cmd/netapp-faker` | the only fake component — discovers PVCs from the store holding the ksm families (through vmauth, so it carries basic auth), renders ONTAP series into the other store |
+| `tools/cmd/netapp-faker` | the only fake component — discovers PVCs from the store holding the ksm families (through vmauth, so it carries basic auth), renders ONTAP series into the other store. `estate.go` is the fixed inventory (two controllers with hardware identity and load, two aggregates); `render.go` turns it into Harvest exposition text |
 | `scripts/verify.sh` | one check per pipeline precondition, in data-flow order |
 | `scripts/charts-deps.sh` | offline dependency materialisation, run by `make deps` |
 | `kind/cluster.yaml` | 3 nodes (zone labels so `kube_node_labels` carries something), host port maps |
@@ -194,11 +200,33 @@ Before changing any of these, know what it removes:
   `prometheus` receiver here would write ksm or kubelet series into the *cluster*
   store, where the routing table does not look for them — the series would exist,
   be scraped, cost cardinality, and never reach the graph.
-- **The routing table must cover all five families.** A family served by no
-  backend is a validation error at startup, not a degrade, because the empty
-  vector it would produce is indistinguishable from an estate that holds nothing.
-  `probe` is listed on both entries deliberately: drop it from one and `/readyz`
-  starts calling the estate healthy while that store is down.
+- **The routing table must cover all five REQUIRED families.** A required family
+  served by no backend is a validation error at startup, not a degrade, because
+  the empty vector it would produce is indistinguishable from an estate that
+  holds nothing. `probe` is listed on both entries deliberately: drop it from one
+  and `/readyz` starts calling the estate healthy while that store is down.
+  `alerts` is the sixth family and the only OPTIONAL one — a table omitting it
+  loads, and the backend answers an empty vector at Debug rather than warning,
+  because an estate with no alerting engine is that family's normal state. It is
+  routed to the cluster store here on purpose: without it the overlay is
+  permanently empty, which is exactly the state a demo must be able to tell
+  apart from "nothing is firing".
+- **The ALERTS series must carry `az` / `env`, and it inherits them — nothing
+  stamps them.** The `alerts` family accepts az / env / namespace matchers
+  (never `cluster`: an alert expression does not reliably preserve it), so an
+  ALERTS series without those labels drops out of every filtered request,
+  including the `?az=` / `?env=` that `/v1/storage-graph` REQUIRES. vmalert adds
+  no external labels; the rules in `charts/ksg-demo/values.yaml` are written
+  over series that already carry them, and rewriting one over a series that does
+  not silently empties the overlay for every filtered request while leaving it
+  visible on an unfiltered one.
+- **The alert overlay's kind precedence is by MOST SPECIFIC label, and `aggr`
+  outranks `node`.** The stock `aggr_*` series carry the owning controller's
+  `node` beside `aggr`, so an alert written over them names both and must land
+  on the aggregate. An alert's `cluster` label is compared RAW against
+  `ontap_cluster` on the NetApp side (a filer name composes with no zone or
+  environment) but walks the identity ladder on the Kubernetes side; a name
+  satisfying both is counted ambiguous and attaches to neither.
 - **`usernameEnv` / `passwordEnv` name variables, never values.** The routing
   file is a ConfigMap; the backend rejects a literal `username`/`password` field,
   rejects a half-declared pair, and treats a named-but-unset variable as a load
@@ -268,10 +296,19 @@ Before changing any of these, know what it removes:
   request `prune=false`, so the harness and the front door agree only in the
   `Full inventory` position. A UI showing fewer pods than `make verify` counts
   is the prune, not a broken pipeline.
-- **The storage join is exactly one equality**:
-  `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name`.
-  Nothing else. `netapp-faker` discovers claims each tick and writes the PV name
-  Kubernetes actually assigned. Its two sides now live in DIFFERENT stores — the
+- **The storage join is derive-then-match, never an equality.** An ONTAP volume
+  name admits only letters, digits and `_`, so it can never equal a
+  `pvc-<uuid>` PV name: the backend rewrites `-` to `_` in
+  `kube_persistentvolumeclaim_info.volumename` and SUFFIX-matches that token
+  against the STOCK Harvest `volume` label of `volume_labels` (and of the
+  `qos_*` families, whose second-wave read is scoped to the names hop A
+  matched). Nothing else. `netapp-faker` therefore renders `volume` as the
+  configured `ontapStoragePrefix` followed by the PV name with `-` rewritten to
+  `_`, the shape a CSI provisioner
+  produces — writing the raw PV name would make the two sides meet trivially
+  and prove nothing, and a `volume_name` label is read by nobody. The backend
+  is never told the prefix; that it still resolves is the point of the suffix
+  mode. Its two sides live in DIFFERENT stores — the
   claim in `vm-single`, the volume in `vm` — so no PromQL can perform this join
   and only the backend's fan-out can. That is why `verify.sh` proves the two
   halves separately and then asserts the `pvc-to-netapp-aggr` edge, instead of
@@ -288,7 +325,22 @@ A demo where everything is green teaches nothing. These are intentional:
 - `orders` answers **5% of requests with a 500** so its edges carry a non-zero
   `errorRate` — distinguishable from an edge with no measurement.
 - `ontap-lab-02` reports `node_new_status 0`; degraded is a real reading, distinct
-  from an absent series.
+  from an absent series. vmalert turns it into `NetAppControllerDegraded`.
+- The two alerts fire on DIFFERENT controllers and different tiers:
+  `NetAppAggregateFilling` fires on `aggr1`, which the healthy `ontap-lab-01`
+  owns. Its threshold is `0.5`, not the more natural-looking `0.65`, because the
+  faker oscillates every gauge ±25% around its base — aggr1 stays inside
+  [0.53, 0.89] and aggr2 inside [0.14, 0.24], so 0.5 is the only band where each
+  sits on one side for every tick. At 0.65 the alert flaps and `make verify`
+  becomes a coin toss.
+- The two controllers are deliberately different hardware under different load
+  (AFF-A400 at 34% CPU vs an older FAS2720 at 78%). `data.perf` is carried raw
+  and never turned into a verdict: busy is not unhealthy.
+- Claims are placed on aggregates by RANK over the sorted claim list, not by
+  hashing the PV name. Hashing kept a claim on one aggregate across restarts but
+  let all three land on the same one by chance — which happened, leaving the
+  other controller drawn with no flow through it. Two aggregates of different
+  health only teach something if both carry claims; `verify.sh` §6 asserts that.
 - `mongodb`'s Service is **headless** (`cluster_ip: None`), carrying no ipaddress.
 - `catalog` reaches mongodb via a **connection string** (`dbEndpoints`) rather than
   an HTTP call, which is the only thing producing `pod-calls-service` plus its

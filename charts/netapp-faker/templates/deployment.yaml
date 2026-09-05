@@ -46,6 +46,8 @@ spec:
               value: {{ .Values.ontapCluster | quote }}
             - name: ONTAP_SVM
               value: {{ .Values.ontapSVM | quote }}
+            - name: ONTAP_STORAGE_PREFIX
+              value: {{ .Values.ontapStoragePrefix | quote }}
             - name: INTERVAL
               value: {{ .Values.interval | quote }}
             - name: LOOKBACK

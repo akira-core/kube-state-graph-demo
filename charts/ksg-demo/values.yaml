@@ -215,6 +215,90 @@ victoria-metrics-auth:
       memory: 128Mi
 
 # ---------------------------------------------------------------------------
+# vmalert — the alert overlay's producer.
+#
+# The graph's `alerts` family reads ALERTS{alertstate="firing"} and attaches
+# what it finds to the node the alert's labels name. Something has to WRITE
+# those series, and a demo whose overlay is permanently empty cannot show the
+# difference between "nothing is wrong" and "the family is unserved".
+#
+# It reads the CLUSTER store and writes back to it, because that is where the
+# Harvest families it alerts on live. `notifier.blackhole` means no
+# Alertmanager: the alerts are evaluated and persisted, never delivered — this
+# demo is about the graph carrying them, not about paging anyone.
+#
+# The rules are deliberately written over series that ALREADY carry the az /
+# env external labels, so ALERTS inherits them from the expression output. The
+# `alerts` family accepts az / env / namespace matchers (never `cluster` — an
+# alert expression does not reliably preserve it), so an overlay whose series
+# lacked those labels would vanish from every filtered request, including the
+# ?az= / ?env= that /v1/storage-graph REQUIRES.
+# ---------------------------------------------------------------------------
+victoria-metrics-alert:
+  server:
+    fullnameOverride: vmalert
+    replicaCount: 1
+    datasource:
+      url: http://vm-vmselect:8481/select/0/prometheus
+    remoteWrite:
+      url: http://vm-vminsert:8480/insert/0/prometheus
+    remoteRead:
+      url: http://vm-vmselect:8481/select/0/prometheus
+    extraArgs:
+      notifier.blackhole: true
+    config:
+      alerts:
+        groups:
+          - name: ksg-demo-netapp
+            interval: 15s
+            rules:
+              # The controller tier. `node_new_status` 0 is a real reading of
+              # "degraded" (ontap-lab-02 reports it on purpose), distinct from
+              # the series being absent. The output carries `cluster` (the
+              # ONTAP cluster, NOT a Kubernetes one) and `node`, which is
+              # exactly the shape the overlay matches a netapp-node on — it
+              # compares that label RAW, since a filer name composes with no
+              # zone or environment.
+              - alert: NetAppControllerDegraded
+                expr: node_new_status == 0
+                for: 1m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: ONTAP controller {{ $labels.node }} reports degraded
+
+              # The aggregate tier. This fires on aggr1, which the HEALTHY
+              # controller owns — the two tiers alert independently, which is
+              # the thing worth showing.
+              #
+              # The threshold is 0.5 because the faker oscillates every gauge
+              # by ±25% around its base: aggr1 (0.71 base) stays inside
+              # [0.53, 0.89] and aggr2 (0.19) inside [0.14, 0.24], so 0.5 is
+              # the only band where each aggregate sits on ONE side for every
+              # tick. At the more natural-looking 0.65 the alert flaps with the
+              # wobble and `make verify` becomes a coin toss — the alert has to
+              # be a property of the estate, not of which second it was read.
+              #
+              # The stock aggr_* series carry the owning controller's `node`
+              # beside `aggr`, so this output names both. The overlay ranks
+              # `aggr` above `node` for exactly that reason and attaches it to
+              # the aggregate rather than one tier up.
+              - alert: NetAppAggregateFilling
+                expr: aggr_space_used / aggr_space_total > 0.5
+                for: 1m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: ONTAP aggregate {{ $labels.aggr }} is over half full
+
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# ---------------------------------------------------------------------------
 # kube-state-metrics — the topology half of the graph.
 #
 # The collector list and the two allowlists below are lifted from the backend's
@@ -483,6 +567,13 @@ kube-state-graph:
   # request-scoped matcher, and listing it twice is what makes /readyz ask both
   # stores instead of declaring the estate healthy on the strength of one.
   #
+  # `alerts` is the one OPTIONAL family: a table that omits it still loads, and
+  # the backend answers an empty vector rather than warning, because an estate
+  # with no alerting engine is that family's normal state. It is listed here
+  # because vmalert writes ALERTS into the cluster store, and the difference
+  # between "no alerts are firing" and "nobody is evaluating any rules" is
+  # exactly what a demo has to be able to show.
+  #
   # No `zones` on either entry. Zone routing is real, but this demo stamps a
   # single az value across the whole estate, so declaring zones here would be
   # decoration that never selects anything.
@@ -492,7 +583,7 @@ kube-state-graph:
       # under /select/<accountID>/prometheus, and the backend appends
       # /api/v1/... to whatever base it is given.
       url: http://vm-vmselect:8481/select/0/prometheus
-      families: [harvest, servicegraph, probe]
+      families: [harvest, servicegraph, probe, alerts]
     - name: single-store
       # Through vmauth, not to vm-single directly: the credential legs of the
       # routing table are only exercised if something actually demands them.
@@ -613,6 +704,13 @@ kube-state-graph-frontend:
     theme: system
     endpoints:
       graph: /api/v1/graph
+      # The storage-flow DAG the Sankey view draws. Independent of `graph`:
+      # omitting it disables the Sankey alone and leaves the Graph working, so
+      # its absence reads as a reduced demo rather than a broken pipeline. Same
+      # /api/ proxy as `graph`. The endpoint requires a SINGLE ?az= and ?env=,
+      # which the Sankey's scope bar takes from the same kube_pod_info label
+      # values `labelValues` below serves the filter bar.
+      storageGraph: /api/v1/storage-graph
       # A Prometheus API ROOT, not a query path. The identity filter controls
       # read kube_pod_info label values from it, which is the ONLY source that
       # yields values `?cluster=` can act on: the graph response carries the

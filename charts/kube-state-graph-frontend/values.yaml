@@ -42,6 +42,13 @@ config:
   endpoints:
     # Same-origin. `proxy.graph` below is where it lands.
     graph: /api/v1/graph
+    # The storage-flow DAG the Sankey view is drawn from. Independent of
+    # `graph`: leaving it out disables the Sankey alone and the Graph keeps
+    # working, so its absence looks like a deliberately reduced demo rather
+    # than a broken one. It rides the same /api/ proxy — the endpoint requires
+    # a single ?az= and ?env=, which the Sankey's own scope bar supplies from
+    # the same kube_pod_info label values the filter bar reads.
+    storageGraph: /api/v1/storage-graph
     # Prometheus API ROOT (no /api/v1 suffix — that belongs to the API). The
     # identity filter controls read kube_pod_info label values from here.
     labelValues: /metrics-api

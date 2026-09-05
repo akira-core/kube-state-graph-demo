@@ -40,6 +40,8 @@ doing real work:
 | Real kubelet volume stats for claims on `netapp-nas` (CSI NFS `NodeGetVolumeStats`) | |
 | Real HTTP calls between workloads, traced with OpenTelemetry | |
 | The service-graph metrics, derived from those traces by the collector | |
+| **vmalert** evaluating real alerting rules and persisting real `ALERTS` series | The readings those rules fire on — controller health, aggregate fill |
+| kube-state-graph reading, joining and projecting all of it | Controller hardware (`model` / `serial` / `version`) and `system_node` load counters |
 
 There is exactly one component whose data is invented — `netapp-faker` — because
 a laptop cannot run an ONTAP array. Even that one **discovers rather than
@@ -77,6 +79,8 @@ appear within one tick.
         ┌───────────────┐                            │                         │
         │    vmauth     │◀── discovery ── netapp-faker                          │
         └───────┬───────┘                            │                         │
+                │                        vmalert ────┤  rules in, ALERTS out    │
+                │                       (blackhole)  │  — both ends store 1     │
                 │           PromQL, routed by family │                         │
                 └──────────────┬─────────────────────┘                         │
                       ┌────────▼─────────┐                                     │
@@ -99,11 +103,18 @@ kube-state-graph assembles one graph from both. The split is by producer:
 
 | Store | Query families | Written by | Read path |
 |---|---|---|---|
-| VictoriaMetrics **cluster** | `harvest`, `servicegraph` | netapp-faker (import), OTel Collector (remote-write) | vmselect, unauthenticated |
+| VictoriaMetrics **cluster** | `harvest`, `servicegraph`, `alerts` | netapp-faker (import), OTel Collector (remote-write), vmalert (rule results) | vmselect, unauthenticated |
 | VictoriaMetrics **single** | `ksm`, `kubelet` | vmagent | vmauth, basic auth |
 
 The `probe` family (`up{}`) is served by both, so `/readyz` asks both stores
 rather than calling the estate healthy on the strength of one.
+
+`alerts` is the one **optional** family: a routing table omitting it still
+loads and the backend answers an empty vector without warning, because an
+estate running no alerting engine is that family's normal state. It is served
+here so the overlay has something to overlay — the difference between "nothing
+is firing" and "nobody is evaluating rules" is exactly what a demo has to be
+able to show.
 
 This is not decoration. It puts the two halves of the storage join in different
 stores — `kube_persistentvolumeclaim_info` in one, `volume_labels` in the
@@ -186,7 +197,18 @@ A demo where everything is green teaches nothing. These are on purpose:
   `errorRate`. An edge with `errorRate: 0` and an edge with no measurement at
   all must look different in the UI.
 - **`ontap-lab-02` reports `node_new_status 0`.** Degraded is a real reading,
-  distinct from the series being absent.
+  distinct from the series being absent. vmalert turns it into a firing
+  `NetAppControllerDegraded`, which the graph attaches to that controller node.
+- **The two alerts fire on different controllers and different tiers.**
+  `NetAppAggregateFilling` fires on `aggr1`, which the **healthy**
+  `ontap-lab-01` owns. A degraded box is not the only thing worth an alert, and
+  the overlay has to attach an aggregate alert to the aggregate rather than one
+  tier up on its controller — the stock `aggr_*` series name both.
+- **The two controllers are different hardware under different load.**
+  `ontap-lab-01` is an AFF-A400 at 34% CPU; `ontap-lab-02` is an older FAS2720
+  at 78% doing a third the ops at four times the latency. Those figures are
+  carried through to `data.perf` raw and are never turned into a verdict —
+  "busy" is not "unhealthy", and the pipeline must not decide otherwise.
 - **`mongodb`'s Service is headless**, so its `cluster_ip` is `None` and it
   carries no ipaddress — again distinct from an unknown one.
 - **Shared NFS export capacity.** `csi-driver-nfs` reports `statfs` of the
@@ -227,6 +249,7 @@ charts/ksg-demo/charts/
   victoria-metrics-single/   0.45.0     ── vendored, tracked   store 2
   victoria-metrics-agent/    0.46.0     ── vendored, tracked   scrapes into store 2
   victoria-metrics-auth/     0.40.0     ── vendored, tracked   store 2's read path
+  victoria-metrics-alert/    0.47.0     ── vendored, tracked   ALERTS into store 1
   csi-driver-nfs/            4.13.4     ── vendored, tracked
   *.tgz                                 ── first-party charts, rebuilt by make deps
 ```
@@ -320,7 +343,7 @@ forwards it in-cluster:
 
 | Browser asks | Reaches | Why not direct |
 |---|---|---|
-| `/api/v1/graph`, `/api/v1/edge-types` | `kube-state-graph:8080` | the backend would otherwise need a CORS policy naming this origin |
+| `/api/v1/graph`, `/api/v1/storage-graph`, `/api/v1/edge-types` | `kube-state-graph:8080` | the backend would otherwise need a CORS policy naming this origin |
 | `/metrics-api/api/v1/label/<name>/values` | `vm-auth:8427`, with the basic-auth header attached in-cluster | the credential must never reach a browser |
 
 The filter bar sends what it collects straight to the backend. `cluster`, `az`,
@@ -339,6 +362,36 @@ The time picker in the nav bar is the request window: the backend requires an
 absolute `start` and `end` on every call, and the front end resolves the
 selection at request time so a reload never re-asks for a stale window.
 
+### The Sankey view
+
+The second tab is a different question against a different endpoint. `/v1/graph`
+is workload-rooted; `/v1/storage-graph` is a **storage-flow DAG** oriented
+storage → workload, along one fixed tier chain:
+
+```
+netapp-node → netapp-aggr → netapp-svm → pvc → pod → node
+```
+
+Every hop carries the claim I/O summed over everything flowing through it, and
+the totals **conserve tier to tier** — that is what makes the link widths mean
+something, and `verify.sh` asserts it by comparing the top hop's `read_ops`
+against the claim hop's. Two things about this endpoint differ from `/v1/graph`
+and both are visible in the UI:
+
+- **`az` and `env` are REQUIRED and single-valued.** They pin the zone whose
+  Harvest store answers and narrow the workload side to one estate, so a filer
+  shared across zones is never merged into one diagram. The Sankey's scope bar
+  is therefore its own control, not the graph's filter bar, and it takes its
+  options from the same `kube_pod_info` label values.
+- **Roots may come from either end.** An ONTAP cluster, controller, aggregate
+  or SVM answers "what is on this filer?"; a `namespace/pod` or a Kubernetes
+  node answers "which controller does this pod sit on?". With no root the whole
+  storage estate the selected zone reaches is drawn.
+
+`netapp-svm` and the `storage-flow` edge type are emitted by this endpoint
+**only** — `/v1/graph` still surfaces the SVM as the PVC's `svm` label and never
+draws a storage-flow edge.
+
 ## Troubleshooting
 
 Start with `make verify`. Nearly every failure mode in this pipeline is silent —
@@ -348,7 +401,7 @@ missing:
 
 ```
 == 7. the split is real, and the join spans it ==
-   ok   volume_name joins a real PV across stores      3 PV names in both stores
+   ok   the derived volume key joins a real PV         3 claims match a FlexVol name
    ok   cluster store holds no kube_pod_info           0 series
    ok   single store holds no volume_labels            0 series
    ok   vmauth rejects an unauthenticated read         HTTP 401
@@ -380,9 +433,14 @@ and therefore the last thing to appear.
 | Graph has pods but no call edges | `make logs-collector`; check `client_k8s_pod_uid` in `make verify` |
 | Call edges end in `external` nodes | the pod UID is not reaching the spans — check `OTEL_RESOURCE_ATTRIBUTES` on a workload |
 | No pods or nodes at all | `kubectl logs deployment/vm-agent` — nothing is scraping into the single-node store |
-| No storage half at all | `make logs-faker`; the join is `kube_persistentvolumeclaim_info.volumename == volume_labels.volume_name` and nothing else, and its two halves are in different stores |
+| No storage half at all | `make logs-faker`; the join derives a token from `kube_persistentvolumeclaim_info.volumename` (`-` → `_`) and suffix-matches it against the stock Harvest `volume` label, and nothing else — its two halves are in different stores |
 | Edges have no `p90ServerMs` | the collector's `transform/servicegraph-names` — with metric suffixes off, the histogram loses its `_seconds` and must have it put back |
 | `/readyz` is 503 naming a backend | that store is down or unreachable; the body names the backend, never its URL |
+| Sankey shows its empty state | `endpoints.storageGraph` is absent from `config.json`, or no `az`/`env` is selected — both are required and single-valued |
+| Sankey draws with a gap between two tiers | one leg of the chain is empty; `make verify` §10 names which tier has no edges |
+| No node carries `data.alerts` | `kubectl logs deployment/vmalert`; the `alerts` family must also be routed in `kube-state-graph.backends`, and ALERTS must carry `az`/`env` (it inherits them from the expression output) |
+| `data.alerts` is in the API body but the UI shows no alert | fixed in frontend `002b975`; on an older SPA image `parseAlerts` required the panel-era occurrence time and dropped every entry without one. The overlay's alerts carry no time, so the panel shows `n/a` in Count and Last occurred — that is the degraded form, not a missing reading |
+| A controller shows no model or CPU figure | the `node_labels` / `system_node` legs are optional and degrade silently — check `make verify` §6 |
 | Everything filtered by `?az=` is empty | vmagent's `external_labels` and the collector's `transform/external-labels` disagree — both must come from `global.ksgExternalLabels` |
 | Graph ids / cluster compound read `local-a-demo-ksg-demo` | expected: that is the composed identity `<az>-<env>-<cluster>` |
 | `?cluster=local-a-demo-ksg-demo` is empty | expected: `?cluster=` takes the raw name `ksg-demo`; pin with `?az=local-a&env=demo&cluster=ksg-demo` |

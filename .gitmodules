@@ -1,7 +1,7 @@
 [submodule "kube-state-graph"]
 	path = kube-state-graph
 	url = https://github.com/akira-core/kube-state-graph
-	branch = main
+	branch = feat/netapp-storage-graph-api-openspec
 [submodule "kube-state-graph-frontend"]
 	path = kube-state-graph-frontend
 	url = https://github.com/akira-core/kube-state-graph-frontend

@@ -156,6 +156,34 @@ query "volume_labels"                 'volume_labels'                           
 query "qos_read_ops"                  'qos_read_ops'                                         "storage edges exist but carry no I/O"
 query "qos policy ceiling"            'qos_policy_fixed_max_throughput_iops'                 "storage edges carry no declared ceiling"
 query "aggr_space_used"               'aggr_space_used'                                      "aggregates show no usage fill"
+query "node_labels (hardware)"        'node_labels{model!=""}'                               "controllers carry no data.hardware — no model, serial or version"
+query "node_cpu_busy"                 'node_cpu_busy'                                        "controllers carry no data.perf.cpu_busy_pct"
+query "node_total_ops"                'node_total_ops'                                       "controllers carry no data.perf.total_ops"
+query "node_total_latency"            'node_total_latency'                                   "controllers carry no data.perf.total_latency_us"
+query "node_total_data"               'node_total_data'                                      "controllers carry no data.perf.total_bytes_per_sec"
+# Both aggregates must carry claims. They used to be assigned by hashing the PV
+# name, which let all three land on one and left the other controller drawn with
+# no flow through it — a Sankey with a dead tier, and nothing in the pipeline
+# saying so.
+query_expr "every aggregate carries a volume" \
+  'count(count by (aggr) (last_over_time(volume_labels{aggr!=""}['"${WINDOW}"']))) == 2' \
+  "the claims are not spread across both aggregates — one controller draws with no flow"
+
+echo
+echo "== 6b. the alert overlay's producer (CLUSTER store) =="
+# vmalert evaluates over the Harvest families and writes ALERTS back. Without
+# it the `alerts` family is served but permanently empty, which is
+# indistinguishable from a healthy estate — the one thing the overlay exists to
+# tell apart.
+query "ALERTS firing"                 'ALERTS{alertstate="firing"}'                          "the alert overlay has nothing to overlay"
+query "controller alert carries node" 'ALERTS{alertstate="firing",alertname="NetAppControllerDegraded",node!=""}' "the controller alert cannot resolve to a netapp-node"
+query "aggregate alert carries aggr"  'ALERTS{alertstate="firing",alertname="NetAppAggregateFilling",aggr!=""}'   "the aggregate alert cannot resolve to a netapp-aggr"
+# The `alerts` family accepts az / env matchers, so an ALERTS series missing
+# them drops out of every filtered request — including the ?az= / ?env= that
+# /v1/storage-graph REQUIRES. They are inherited from the expression output,
+# never stamped by vmalert, which is why the rules are written over series that
+# already carry them.
+query "ALERTS inherits az / env"      'ALERTS{alertstate="firing",az="'"${KSG_AZ}"'",env="'"${KSG_ENV}"'"}' "alerts vanish from every ?az= / ?env= request"
 echo
 echo "== 7. the split is real, and the join spans it =="
 # This used to be one PromQL expression joining volume_labels to
@@ -163,23 +191,44 @@ echo "== 7. the split is real, and the join spans it =="
 # now live in different stores, and no single store can join across them. That
 # is the whole point — assembling this join is kube-state-graph's job, and
 # section 9 asserts the edge it produces. Here we only prove the two halves
-# exist, on the two sides, and refer to the same PV names.
+# exist, on the two sides, and that one derives onto the other.
+#
+# The join is derive-then-match, NOT equality. An ONTAP volume name admits only
+# letters, digits and `_`, so it can never equal a `pvc-<uuid>` PV name: the
+# backend rewrites `-` to `_` and SUFFIX-matches the token against the stock
+# Harvest `volume` label, which is why it never has to be told the
+# provisioner's storagePrefix. The two greps below reproduce exactly that
+# default derivation — a check comparing the two sides for equality would be
+# asserting a join the backend does not perform.
 
-harvest_pvs=$(curl -sS --max-time 20 --get "${VMSELECT}/api/v1/query" \
+harvest_vols=$(curl -sS --max-time 20 --get "${VMSELECT}/api/v1/query" \
   --data-urlencode "query=last_over_time(volume_labels[${WINDOW}])" 2>/dev/null \
-  | jq -r '.data.result[]?.metric.volume_name // empty' | sort -u)
+  | jq -r '.data.result[]?.metric.volume // empty' | sort -u)
 
-k8s_pvs=$(curl -sS --max-time 20 --user "${VMAUTH_USER}:${VMAUTH_PASS}" \
+k8s_tokens=$(curl -sS --max-time 20 --user "${VMAUTH_USER}:${VMAUTH_PASS}" \
   --get "${VMAUTH}/api/v1/query" \
   --data-urlencode "query=last_over_time(kube_persistentvolumeclaim_info{volumename!=\"\"}[${WINDOW}])" 2>/dev/null \
-  | jq -r '.data.result[]?.metric.volumename // empty' | sort -u)
+  | jq -r '.data.result[]?.metric.volumename // empty' | tr '-' '_' | sort -u)
 
-shared=$(comm -12 <(printf '%s\n' "${harvest_pvs}") <(printf '%s\n' "${k8s_pvs}") | grep -c . || true)
+# Claims whose derived token is the suffix of at least one FlexVol name. Plain
+# bash `case` globbing rather than grep, so a token is never re-read as a
+# pattern.
+shared=0
+while IFS= read -r token; do
+  [[ -n "${token}" ]] || continue
+  while IFS= read -r vol; do
+    [[ -n "${vol}" ]] || continue
+    case "${vol}" in
+      *"${token}") shared=$((shared + 1)); break ;;
+    esac
+  done <<<"${harvest_vols}"
+done <<<"${k8s_tokens}"
+
 if [[ "${shared}" -gt 0 ]]; then
-  check "volume_name joins a real PV across stores" yes "${shared} PV names in both stores"
+  check "the derived volume key joins a real PV" yes "${shared} claims match a FlexVol name"
 else
-  check "volume_name joins a real PV across stores" no \
-    "the fake estate hangs off nothing ($(grep -c . <<<"${harvest_pvs}") harvest / $(grep -c . <<<"${k8s_pvs}") k8s PV names)"
+  check "the derived volume key joins a real PV" no \
+    "the fake estate hangs off nothing ($(grep -c . <<<"${harvest_vols}") FlexVol / $(grep -c . <<<"${k8s_tokens}") claim names)"
 fi
 
 # Negative proofs that the two stores hold DIFFERENT things. Without these, a
@@ -373,6 +422,34 @@ else
     check "?cluster=<identity> is empty (not a filter value)" no \
       "${identity_nodes} nodes / clusters ${identity_clusters} — identity leaked into ?cluster="
   fi
+
+  # The three optional NetApp legs, asserted on the BODY rather than on the
+  # series: each degrades log-and-continue, so a leg that never reached the
+  # graph looks upstream-identical to one that was never rendered.
+  hw=$(jq '[.elements.nodes[] | select(.data.type == "netapp-node" and (.data.hardware.model // "") != "")] | length' <<<"${graph}")
+  check "netapp-node carries data.hardware" "$( [[ "${hw}" != "0" ]] && echo yes || echo no )" \
+    "${hw} controllers name a model (node_labels)"
+
+  perf=$(jq '[.elements.nodes[] | select(.data.type == "netapp-node" and .data.perf.cpu_busy_pct != null)] | length' <<<"${graph}")
+  check "netapp-node carries data.perf" "$( [[ "${perf}" != "0" ]] && echo yes || echo no )" \
+    "${perf} controllers report cpu_busy_pct (system_node)"
+
+  # The overlay's whole job: an alert firing upstream has to arrive ATTACHED to
+  # the node its labels name, not merely exist in the store.
+  alerted=$(jq '[.elements.nodes[] | select((.data.alerts // []) | length > 0)] | length' <<<"${graph}")
+  check "alerts attach to graph nodes" "$( [[ "${alerted}" != "0" ]] && echo yes || echo no )" \
+    "${alerted} nodes carry data.alerts"
+
+  ctrl_alert=$(jq '[.elements.nodes[] | select(.data.type == "netapp-node") | (.data.alerts // [])[] | select(.name == "NetAppControllerDegraded")] | length' <<<"${graph}")
+  check "controller alert lands on the netapp-node" "$( [[ "${ctrl_alert}" != "0" ]] && echo yes || echo no )" \
+    "${ctrl_alert} matched — a {cluster,node} alert resolving to the ONTAP side"
+
+  # `aggr` outranks `node` in the overlay's kind precedence. The stock aggr_*
+  # series carry both, so a regression here puts every aggregate alert one tier
+  # up on the controller instead.
+  aggr_alert=$(jq '[.elements.nodes[] | select(.data.type == "netapp-aggr") | (.data.alerts // [])[] | select(.name == "NetAppAggregateFilling")] | length' <<<"${graph}")
+  check "aggregate alert lands on the netapp-aggr" "$( [[ "${aggr_alert}" != "0" ]] && echo yes || echo no )" \
+    "${aggr_alert} matched — aggr outranks node"
 fi
 
 echo
@@ -418,6 +495,66 @@ else
   else
     check "graph answers through the front door (${graph_path})" no \
       "HTTP ${code}, ${elems} elements — nginx /api/ is not reaching kube-state-graph"
+  fi
+fi
+
+# The Sankey's own endpoint, and the second thing the front door proxies to the
+# backend. It is asserted separately from the graph because it can fail on its
+# own in two ways the graph never would: it is the only endpoint requiring a
+# SINGLE ?az= and ?env= (both absent or repeated is a 400, not a wider answer),
+# and its body is a storage-flow DAG whose tiers each have to be present for the
+# diagram to draw. A response that is 200 but missing a tier renders as a Sankey
+# with a gap, which looks like an estate fact rather than a broken pipeline.
+storage_path=$(jq -r '.endpoints.storageGraph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+if [[ -z "${storage_path}" ]]; then
+  check "config names a storage-graph endpoint" no \
+    "endpoints.storageGraph is absent — the Sankey view is disabled and shows its empty state"
+else
+  code=$(curl -sS --max-time 30 -o /tmp/ksg-verify-storage.json -w '%{http_code}' \
+    "${FRONTEND}${storage_path}?start=$(( now - 900 ))&end=${now}&az=${KSG_AZ}&env=${KSG_ENV}" 2>/dev/null || echo 000)
+  if [[ "${code}" == 200 ]]; then
+    check "storage graph answers through the front door (${storage_path})" yes "HTTP ${code}"
+  else
+    check "storage graph answers through the front door (${storage_path})" no \
+      "HTTP ${code} — nginx /api/ is not reaching /v1/storage-graph, or az/env were rejected"
+  fi
+
+  # Every hop of the fixed tier chain. A missing tier is a Sankey that stops
+  # short, and each one breaks for its own reason: node-aggr is the Harvest
+  # aggregate leg, svm-pvc is the cross-store volume join, pod-node is kubelet.
+  missing=""
+  for tier in node-aggr aggr-svm svm-pvc pvc-pod pod-node; do
+    n=$(jq --arg t "${tier}" '[.elements.edges[]? | select(.data.labels.tier == $t)] | length' \
+      /tmp/ksg-verify-storage.json 2>/dev/null || echo 0)
+    [[ "${n}" == "0" || "${n}" == "null" ]] && missing="${missing} ${tier}"
+  done
+  if [[ -z "${missing}" ]]; then
+    tiers=$(jq '[.elements.edges[]? | select(.data.labels.tier != null)] | length' /tmp/ksg-verify-storage.json)
+    check "storage-flow chain is complete (all 5 tiers)" yes "${tiers} storage-flow edges"
+  else
+    check "storage-flow chain is complete (all 5 tiers)" no \
+      "no edges on tier(s):${missing} — the Sankey draws with a gap"
+  fi
+
+  # The flow weights are what give a Sankey link its width, and they must
+  # conserve tier to tier. Comparing the top hop against the claim hop is the
+  # cheapest end-to-end statement of that: they are summed over different edge
+  # sets and can only agree if every claim's I/O rode the whole chain.
+  top=$(jq '[.elements.edges[]? | select(.data.labels.tier == "node-aggr") | .data.metrics.read_ops // 0] | add // 0' /tmp/ksg-verify-storage.json)
+  leaf=$(jq '[.elements.edges[]? | select(.data.labels.tier == "svm-pvc") | .data.metrics.read_ops // 0] | add // 0' /tmp/ksg-verify-storage.json)
+  # Not an equality: the figures are summed over different edge sets and each
+  # is rounded to 6 significant digits, so they agree to within rounding rather
+  # than bit for bit. 0.1% is far tighter than a dropped claim (33% here) and
+  # far looser than that rounding.
+  conserved=$(jq -n --argjson a "${top}" --argjson b "${leaf}" \
+    '$a > 0 and (($a - $b) | fabs) < ($a * 0.001)')
+  summary=$(jq -rn --argjson a "${top}" --argjson b "${leaf}" \
+    '"node-aggr \($a | .*100 | round / 100) vs svm-pvc \($b | .*100 | round / 100) read_ops"')
+  if [[ "${conserved}" == "true" ]]; then
+    check "flow weights conserve tier to tier" yes "${summary}"
+  else
+    check "flow weights conserve tier to tier" no \
+      "${summary} — the summation does not carry through"
   fi
 fi
 
