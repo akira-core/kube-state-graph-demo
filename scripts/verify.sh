@@ -480,6 +480,25 @@ fi
 code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "${FRONTEND}/healthz" 2>/dev/null || echo 000)
 check "front door answers /healthz" "$( [[ "${code}" == 200 ]] && echo yes || echo no )" "HTTP ${code}"
 
+# The SPA is two PAGES, not two tabs: /graph and /sankey are real URLs the
+# router owns, and each carries its own scope in the query string. Only the
+# nginx history fallback (`try_files $uri $uri/ /index.html`) makes them
+# reachable by a full page load — a typed link, a refresh, a shared URL. Without
+# it nginx looks for a file called `sankey`, finds none, and answers 404: the
+# in-app nav still works, so the break is invisible to anyone who only ever
+# clicks. Assert the document, not merely the status, because a 200 carrying
+# the wrong body would pass a status-only check.
+for route in graph sankey; do
+  body=$(curl -sS --max-time 20 -w '\n%{http_code}' "${FRONTEND}/${route}" 2>/dev/null || echo $'\n000')
+  code=${body##*$'\n'}
+  if [[ "${code}" == 200 ]] && grep -qi '<div id="root"' <<<"${body}"; then
+    check "front door deep-links to /${route}" yes "HTTP ${code}, index.html served"
+  else
+    check "front door deep-links to /${route}" no \
+      "HTTP ${code} — the nginx history fallback is gone, so a refresh or a shared /${route} link 404s"
+  fi
+done
+
 graph_path=$(jq -r '.endpoints.graph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
 if [[ -z "${graph_path}" ]]; then
   check "config names a graph endpoint" no "endpoints.graph is absent — the SPA cannot load at all"

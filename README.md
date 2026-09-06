@@ -14,7 +14,7 @@ nginx, talking to the backend through its own origin.
 
 ```bash
 make up          # ~5 minutes on a cold laptop
-open http://localhost:3001      # the front door: Graph and Sankey views
+open http://localhost:3001      # the front door: /graph and /sankey
 ```
 
 Then:
@@ -309,7 +309,7 @@ from inside a subchart's values.
 
 | | URL | Notes |
 |---|---|---|
-| Front door | <http://localhost:3001> | the SPA: Graph and Sankey views, with the filter bar |
+| Front door | <http://localhost:3001> | the SPA. Two pages: `/graph` and `/sankey`; `/` redirects to `/graph` |
 | Graph API | <http://localhost:18080/docs> | Scalar UI over the OpenAPI spec |
 | VM cluster store | <http://localhost:18481/select/0/prometheus> | vmselect — Harvest and service-graph series, in raw PromQL |
 | VM single store | <http://localhost:18427> | vmauth — kube-state-metrics and kubelet series. Needs `curl -u ksg:ksg-demo-not-a-real-secret` |
@@ -338,6 +338,22 @@ The front door's runtime configuration is authored in this repository, at
 frontend's own bundled showcase fixture, a convincing graph that proves nothing
 about the pipeline behind it.
 
+The SPA is two **pages**, not two tabs: `/graph` and `/sankey` are real URLs, `/`
+redirects to `/graph`, and each page carries its own scope in the query string
+(`?namespace=shop&edge_type=…` for the graph, `?az=…&env=…&mode=write` for the
+Sankey, plus the shared `?from=&to=` window). A link is therefore reproducible —
+paste one and you land on the same view — which is what makes a bug report about
+this demo actionable.
+
+Two consequences for the wiring here. The nginx history fallback
+(`try_files $uri $uri/ /index.html`) is what makes those URLs survive a full page
+load; without it nginx looks for a file named `sankey`, finds none, and answers
+404 while the in-app switch keeps working — invisible to anyone who only clicks,
+which is why `verify.sh` §10 requests both paths directly. And a sole `az` / `env`
+is seeded into the Sankey's scope once on arrival: this estate has exactly one of
+each, so the diagram draws without a manual selection, and the pill can still be
+cleared.
+
 Everything the browser fetches it fetches from **its own origin**, and nginx
 forwards it in-cluster:
 
@@ -364,7 +380,7 @@ selection at request time so a reload never re-asks for a stale window.
 
 ### The Sankey view
 
-The second tab is a different question against a different endpoint. `/v1/graph`
+The second **page** is a different question against a different endpoint. `/v1/graph`
 is workload-rooted; `/v1/storage-graph` is a **storage-flow DAG** oriented
 storage → workload, along one fixed tier chain:
 

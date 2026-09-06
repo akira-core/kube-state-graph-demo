@@ -277,6 +277,14 @@ Before changing any of these, know what it removes:
   control is gone. `verify.sh` §10 therefore requests the graph **through the
   front door's own origin**, not against the backend directly — proxying is part
   of what is under test and a 404 there is invisible from the backend side.
+- **The SPA is two ROUTES, and only the nginx history fallback makes them
+  reachable.** `/graph` and `/sankey` are URLs the router owns, each carrying its
+  own scope in the query string; `/` redirects to `/graph`. `try_files $uri $uri/
+  /index.html` in the nginx Secret is what serves `index.html` for a path with no
+  file behind it. Drop it and the in-app switch still works while every refresh,
+  typed link and shared URL 404s — a break invisible to anyone who only clicks,
+  which is why `verify.sh` §10 fetches both paths and asserts the document, not
+  just the status.
 - **`cluster` / `az` / `env` / `namespace` options come from `kube_pod_info` on
   the single-node store**, reached at `/metrics-api/api/v1/label/<name>/values`
   through the front door's nginx. Never from the graph API's `clusters[]` (those
