@@ -11,16 +11,21 @@ import (
 // config drives the fake ONTAP estate. Everything except the endpoints has a
 // working default so the chart only has to wire the two VictoriaMetrics URLs.
 type config struct {
-	SelectURL    string        // read endpoint's Prometheus API base, e.g. http://vmselect:8481/select/0/prometheus
-	SelectUser   string        // basic-auth user for SelectURL; empty means unauthenticated
-	SelectPass   string        // basic-auth password for SelectURL
-	InsertURL    string        // vminsert Prometheus API base, e.g. http://vminsert:8480/insert/0/prometheus
-	StorageClass string        // only claims on this StorageClass get a fake backend
-	OntapCluster string        // ONTAP cluster name — NOT a Kubernetes cluster
-	SVM          string        // the storage virtual machine every fake volume lives in
-	Interval     time.Duration // push cadence
-	Lookback     time.Duration // discovery window against vmselect
-	ExtraLabels  map[string]string
+	SelectURL    string // read endpoint's Prometheus API base, e.g. http://vmselect:8481/select/0/prometheus
+	SelectUser   string // basic-auth user for SelectURL; empty means unauthenticated
+	SelectPass   string // basic-auth password for SelectURL
+	InsertURL    string // vminsert Prometheus API base, e.g. http://vminsert:8480/insert/0/prometheus
+	StorageClass string // only claims on this StorageClass get a fake backend
+	OntapCluster string // ONTAP cluster name — NOT a Kubernetes cluster
+	SVM          string // the storage virtual machine every fake volume lives in
+	// StoragePrefix is the provisioner's storagePrefix: what a FlexVol name
+	// carries in front of the transformed PV name. kube-state-graph is never
+	// told this value — it suffix-matches — so changing it here must leave the
+	// storage chain intact, which is exactly what makes it worth being real.
+	StoragePrefix string
+	Interval      time.Duration // push cadence
+	Lookback      time.Duration // discovery window against vmselect
+	ExtraLabels   map[string]string
 }
 
 func loadConfig() (config, error) {
@@ -32,8 +37,11 @@ func loadConfig() (config, error) {
 		StorageClass: envStr("STORAGE_CLASS", "netapp-nas"),
 		OntapCluster: envStr("ONTAP_CLUSTER", "ontap-lab"),
 		SVM:          envStr("ONTAP_SVM", "svm_demo"),
-		Interval:     15 * time.Second,
-		Lookback:     10 * time.Minute,
+		// Trident's own default. Trailing `_` included: the prefix is
+		// concatenated, not joined with a separator.
+		StoragePrefix: envStr("ONTAP_STORAGE_PREFIX", "trident_"),
+		Interval:      15 * time.Second,
+		Lookback:      10 * time.Minute,
 	}
 	if cfg.SelectURL == "" || cfg.InsertURL == "" {
 		return cfg, fmt.Errorf("VM_SELECT_URL and VM_INSERT_URL are both required")

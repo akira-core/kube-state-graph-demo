@@ -1,0 +1,14 @@
+{{- $app := .Values.server }}
+{{- if empty $app.configMap }}
+{{- $ctx := dict "helm" . "appKey" "server" }}
+{{- $fullname := include "vm.plain.fullname" $ctx }}
+{{- $ns := include "vm.namespace" $ctx }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vmalert.rules.config.name" $ctx }}
+  namespace: {{ $ns }}
+  labels: {{ include "vm.labels" $ctx | nindent 4 }}
+data:
+  alert-rules.yaml: |{{ toYaml $app.config.alerts | nindent 4 }}
+{{- end }}

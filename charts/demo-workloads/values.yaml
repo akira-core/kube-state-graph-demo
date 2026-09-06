@@ -1,6 +1,6 @@
 # The workloads the graph is actually a picture of.
 #
-# Every box in the panel below the cluster level comes from these entries: real
+# Every box below the cluster level comes from these entries: real
 # Deployments, StatefulSets, Services, EndpointSlices and PersistentVolumeClaims
 # that kube-state-metrics reports and that call each other over HTTP so the
 # collector's servicegraph connector has real spans to pair.
@@ -107,7 +107,7 @@ workloads:
     service: true
     latency: 30ms
     # Non-zero on purpose: an edge with errorRate 0.05 and an edge with no
-    # measurement at all must look different in the panel.
+    # measurement at all must look different in the UI.
     errorRate: 0.05
     upstreams:
       - http://mongodb.shop.svc.cluster.local:8080/

@@ -17,17 +17,18 @@ HELM         := helm --kube-context $(KUBECTX)
 # Source of the two first-party components. Point these at your own working
 # copies to demo an unpushed change:
 #   make images BACKEND_SRC=../kube-state-graph
+#   make redeploy-frontend FRONTEND_SRC=../kube-state-graph-frontend
 BACKEND_SRC  ?= kube-state-graph
-PANEL_SRC    ?= kube-state-graph-panel
+FRONTEND_SRC ?= kube-state-graph-frontend
 
-BACKEND_IMAGE ?= ksg-demo/kube-state-graph:local
-PANEL_IMAGE   ?= ksg-demo/panel:local
-TOOLS_IMAGE   ?= ksg-demo/tools:local
+BACKEND_IMAGE  ?= ksg-demo/kube-state-graph:local
+FRONTEND_IMAGE ?= ksg-demo/kube-state-graph-frontend:local
+TOOLS_IMAGE    ?= ksg-demo/tools:local
 
 # Host ports, as mapped in kind/cluster.yaml. TWO stores: the graph is assembled
 # from both and the routing table in charts/ksg-demo/values.yaml decides which
 # query families go where.
-GRAFANA_URL  := http://localhost:3001
+FRONTEND_URL := http://localhost:3001
 BACKEND_URL  := http://localhost:18080
 # Cluster store — NetApp Harvest and service-graph series.
 VMSELECT_URL := http://localhost:18481/select/0/prometheus
@@ -56,16 +57,16 @@ down: ## Delete the kind cluster and everything in it
 .PHONY: urls
 urls: ## Print the demo's entry points
 	@echo
-	@echo "  Grafana         $(GRAFANA_URL)      (anonymous admin; dashboard: kube-state-graph / KSG Demo)"
+	@echo "  Front door      $(FRONTEND_URL)      (the standalone SPA; graph + sankey)"
 	@echo "  Graph API       $(BACKEND_URL)/docs"
-	@echo "  VM cluster      $(VMSELECT_URL)   (harvest, service-graph)"
+	@echo "  VM cluster      $(VMSELECT_URL)   (harvest, service-graph; ad-hoc PromQL)"
 	@echo "  VM single       $(VMAUTH_URL)   (kube-state-metrics, kubelet; -u $(VMAUTH_USER):...)"
 	@echo
 
 ##@ Pieces
 
 .PHONY: submodules
-submodules: ## Check out the kube-state-graph and panel submodules
+submodules: ## Check out the kube-state-graph and frontend submodules
 	git submodule update --init --recursive
 
 .PHONY: cluster
@@ -77,15 +78,19 @@ cluster: ## Create the kind cluster (no-op if it already exists)
 	fi
 
 .PHONY: images
-images: image-backend image-panel image-tools ## Build all three local images
+images: image-backend image-frontend image-tools ## Build all three local images
 
 .PHONY: image-backend
 image-backend: ## Build the kube-state-graph API server image
 	docker build -f docker/backend.Dockerfile -t $(BACKEND_IMAGE) $(BACKEND_SRC)
 
-.PHONY: image-panel
-image-panel: ## Build the Grafana panel plugin image (npm build runs inside)
-	docker build -f docker/panel.Dockerfile -t $(PANEL_IMAGE) $(PANEL_SRC)
+# Built from the SUBMODULE's own Dockerfile, unlike the backend. It ships a
+# complete multi-stage build producing an nginx server, so there is nothing for
+# this repository to write. docker/panel.Dockerfile existed only because a
+# Grafana plugin is not a server: that image was a file carrier.
+.PHONY: image-frontend
+image-frontend: ## Build the front-door SPA image (npm build runs inside)
+	docker build -f $(FRONTEND_SRC)/Dockerfile -t $(FRONTEND_IMAGE) $(FRONTEND_SRC)
 
 .PHONY: image-tools
 image-tools: ## Build the demo workload + netapp-faker image
@@ -93,7 +98,7 @@ image-tools: ## Build the demo workload + netapp-faker image
 
 .PHONY: load
 load: ## Side-load the local images into the kind nodes
-	kind load docker-image --name $(CLUSTER) $(BACKEND_IMAGE) $(PANEL_IMAGE) $(TOOLS_IMAGE)
+	kind load docker-image --name $(CLUSTER) $(BACKEND_IMAGE) $(FRONTEND_IMAGE) $(TOOLS_IMAGE)
 
 .PHONY: deps
 deps: ## Package the local subcharts and verify the vendored upstream ones (offline)
@@ -107,7 +112,7 @@ install: ## Install or upgrade the ksg-demo release
 
 .PHONY: wait
 wait: ## Block until every demo workload is ready
-	./scripts/wait-ready.sh $(KUBECTX) $(NAMESPACE) $(BACKEND_URL)
+	./scripts/wait-ready.sh $(KUBECTX) $(NAMESPACE) $(BACKEND_URL) $(FRONTEND_URL)
 
 ##@ Iterating
 
@@ -117,11 +122,11 @@ redeploy-backend: image-backend ## Rebuild the backend image and restart its pod
 	$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/kube-state-graph
 	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/kube-state-graph
 
-.PHONY: redeploy-panel
-redeploy-panel: image-panel ## Rebuild the panel plugin and restart Grafana
-	kind load docker-image --name $(CLUSTER) $(PANEL_IMAGE)
-	$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/grafana
-	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/grafana
+.PHONY: redeploy-frontend
+redeploy-frontend: image-frontend ## Rebuild the front-door SPA and restart it
+	kind load docker-image --name $(CLUSTER) $(FRONTEND_IMAGE)
+	$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/kube-state-graph-frontend
+	$(KUBECTL) -n $(NAMESPACE) rollout status deployment/kube-state-graph-frontend
 
 .PHONY: redeploy-workloads
 redeploy-workloads: image-tools ## Rebuild the demo app and restart every workload
@@ -134,7 +139,7 @@ redeploy-workloads: image-tools ## Rebuild the demo app and restart every worklo
 
 .PHONY: verify
 verify: ## Check every hop of the pipeline and report what the graph contains
-	./scripts/verify.sh $(VMSELECT_URL) $(BACKEND_URL) $(VMAUTH_URL) $(VMAUTH_USER) $(VMAUTH_PASS)
+	./scripts/verify.sh $(VMSELECT_URL) $(BACKEND_URL) $(VMAUTH_URL) $(VMAUTH_USER) $(VMAUTH_PASS) $(FRONTEND_URL)
 
 .PHONY: status
 status: ## Show pods across every demo namespace
@@ -165,6 +170,7 @@ logs-faker: ## Tail the netapp-faker log
 lint: ## Vet the Go tools and lint every chart
 	cd tools && gofmt -l . && go vet ./...
 	$(HELM) lint charts/kube-state-graph --set promURL=http://x
+	$(HELM) lint charts/kube-state-graph-frontend --set global.ksgUpstreamAuth.username=x --set global.ksgUpstreamAuth.password=x
 	$(HELM) lint charts/netapp-faker --set vmSelectURL=http://x --set vmInsertURL=http://x
 	$(HELM) lint charts/demo-workloads --set otlpEndpoint=http://x:4317
 	$(HELM) lint charts/nfs-server

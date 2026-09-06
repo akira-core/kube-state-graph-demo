@@ -1,0 +1,190 @@
+{{- $storageName := "server-volume" }}
+{{- $app := .Values.alertmanager }}
+{{- $pvc := $app.persistentVolume }}
+{{- $mode := $app.mode }}
+{{- if and $mode $app.enabled (hasKey $app $mode) -}}
+{{- $modeOpts := index $app $mode }}
+{{- $ctx := dict "helm" . "appKey" "alertmanager" }}
+{{- $fullname := include "vm.plain.fullname" $ctx }}
+{{- $ns := include "vm.namespace" $ctx }}
+{{- $sa := include "vm.fullname" . }}
+{{- if and (ne $mode "statefulSet") (gt (int $app.replicaCount) 1) }}
+  {{- fail "Alertmanager HA mode is not supported for Deployment. Consider switching to statefulset instead using `alertmanager.mode: statefulSet`" -}}
+{{- end }}
+apiVersion: apps/v1
+kind: {{ title $mode }}
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels: {{ include "vm.labels" $ctx | nindent 4 }}
+spec:
+  {{- with $modeOpts.spec }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+  replicas: {{ $app.replicaCount | default 1 }}
+  {{- if eq $mode "statefulSet" }}
+  serviceName: {{ $fullname }}
+  {{- end }}
+  selector:
+    matchLabels: {{ include "vm.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      {{- $_ := set $ctx "extraLabels" $app.podLabels }}
+      labels: {{ include "vm.podLabels" $ctx | nindent 8 }}
+      {{- $_ := unset $ctx "extraLabels" }}
+      {{- $_ := set $ctx "extraAnnotations" (merge (dict "checksum/config" (include (print .Template.BasePath "/alertmanager-configmap.yaml") . | sha256sum)) (deepCopy $app.podAnnotations)) }}
+      annotations: {{ include "vm.annotations" $ctx | nindent 8 }}
+      {{- $_ := unset $ctx "extraAnnotations" }}
+    spec:
+      {{- if or (.Values.serviceAccount).name (.Values.serviceAccount).create }}
+      serviceAccountName: {{ tpl ((.Values.serviceAccount).name | default $sa) $ctx }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      {{- end }}
+      {{- if $app.podSecurityContext.enabled }}
+      securityContext: {{ include "vm.securityContext" (dict "securityContext" $app.podSecurityContext "helm" .) | nindent 8 }}
+      {{- end }}
+      {{- with ($app.imagePullSecrets | default .Values.global.imagePullSecrets) }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $app.initContainers }}
+      initContainers: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: alertmanager
+          {{- if $app.securityContext.enabled }}
+          securityContext: {{ include "vm.securityContext" (dict "securityContext" $app.securityContext "helm" .) | nindent 12 }}
+          {{- end }}
+          image: {{ include "vm.image" $ctx }}
+          {{- with $app.command }}
+          command: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          args: {{ include "alertmanager.args" $ctx | nindent 12 }}
+          ports:
+            - name: web
+              containerPort: {{ include "vm.port.from.flag" (dict "flag" $app.listenAddress "default" "9093") }}
+              {{- if gt (int $app.replicaCount) 1 }}
+            - name: cluster-tcp
+              containerPort: {{ include "vm.port.from.flag" (dict "flag" $app.cluster.listenAddress "default" "9094") }}
+              protocol: TCP
+            - name: cluster-udp
+              containerPort: {{ include "vm.port.from.flag" (dict "flag" $app.cluster.listenAddress "default" "9094") }}
+              protocol: UDP
+              {{- end }}
+          {{- with $app.envFrom }}
+          envFrom: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+          {{- with (fromYaml (include "vm.probe" (dict "app" $app "type" "readiness"))) }}
+          readinessProbe: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with (fromYaml (include "vm.probe" (dict "app" $app "type" "liveness"))) }}
+          livenessProbe: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with (fromYaml (include "vm.probe" (dict "app" $app "type" "startup"))) }}
+          startupProbe: {{ toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: {{ $storageName }}
+              mountPath: {{ ternary $pvc.mountPath "/data" $pvc.enabled }}
+            - name: config
+              mountPath: /config
+              readOnly: true
+            {{- range $app.extraHostPathMounts }}
+            - name: {{ .name }}
+              mountPath: {{ .mountPath }}
+              {{- with .subPath }}
+              subPath: {{ . }}
+              {{- end }}
+              {{- with .readOnly }}
+              readOnly: {{ . }}
+              {{- end }}
+            {{- end }}
+            {{- with $app.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $app.resources }}
+          resources: {{ toYaml . | nindent 12 }}
+          {{- end }}
+        {{- with $app.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $app.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $app.priorityClassName }}
+      priorityClassName: {{ $app.priorityClassName | quote }}
+      {{- end }}
+      {{- if $app.runtimeClassName }}
+      runtimeClassName: {{ $app.runtimeClassName | quote }}
+      {{- end }}
+      {{- with $app.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $app.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range $constraint := . }}
+        - {{ toYaml $constraint | nindent 10 | trim }}
+          {{- if not $constraint.labelSelector }}
+          labelSelector:
+            matchLabels: {{ include "vm.selectorLabels" $ctx | nindent 14 }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- with $app.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{ end }}
+      volumes:
+        {{- $_ := set $ctx "appKey" "alertmanager" }}
+        - name: config
+          configMap:
+            name: {{ include "alertmanager.config.name" $ctx }}
+        {{- range $app.extraHostPathMounts }}
+        - name: {{ .name }}
+          hostPath:
+            path: {{ .hostPath }}
+        {{- end }}
+        {{- with $app.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if or (eq $mode "deployment") (not $pvc.enabled) $pvc.existingClaim }}
+        - name: {{ $storageName }}
+          {{- if or (and (eq $mode "deployment") $pvc.enabled) $pvc.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{  tpl ($pvc.existingClaim | default $pvc.name | default $fullname) $ctx }}
+          {{- else }}
+          emptyDir: {{ toYaml $app.emptyDir | nindent 12 }}
+          {{- end }}
+        {{- end }}
+  {{- if and (eq $mode "statefulSet") $pvc.enabled (not $pvc.existingClaim) }}
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: {{ tpl ($pvc.name | default $storageName) $ctx }}
+        {{- with $pvc.annotations }}
+        annotations: {{ toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $pvc.extraLabels }}
+        labels: {{ toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        {{- with $pvc.accessModes }}
+        accessModes: {{ toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $pvc.size }}
+        {{- with $pvc.storageClassName }}
+        storageClassName: {{ ternary "" . (eq "-" .) }}
+        {{- end }}
+        {{- with $pvc.matchLabels }}
+        selector:
+          matchLabels: {{ toYaml . | nindent 12 }}
+        {{- end }}
+  {{- end }}
+{{- end -}}

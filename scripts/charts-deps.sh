@@ -8,14 +8,15 @@
 # The two kinds of dependency are therefore handled differently:
 #
 #   upstream (victoria-metrics-cluster, kube-state-metrics,
-#   opentelemetry-collector, grafana, csi-driver-nfs)
+#   opentelemetry-collector, csi-driver-nfs)
 #   — vendored into git UNPACKED, as plain
 #   directories rather than .tgz. Helm loads either, and a directory is
 #   reviewable: a version bump shows up as a diff instead of an opaque binary
 #   blob. Pinned by Chart.lock, refreshed only by `make vendor-charts`.
 #   Verified here, version included.
 #
-#   first-party (kube-state-graph, netapp-faker, demo-workloads, nfs-server) — packaged
+#   first-party (kube-state-graph, kube-state-graph-frontend, netapp-faker,
+#   demo-workloads, nfs-server) — packaged
 #   from charts/<name>/ on every run and deliberately NOT committed. They are
 #   the only dependencies whose content changes between commits, and a
 #   committed copy would be a second, staler source of truth: edit
@@ -29,7 +30,7 @@ dest="${umbrella}/charts"
 lock="${umbrella}/Chart.lock"
 helm_bin="${HELM_BIN:-helm}"
 
-local_charts=(kube-state-graph netapp-faker demo-workloads nfs-server)
+local_charts=(kube-state-graph kube-state-graph-frontend netapp-faker demo-workloads nfs-server)
 
 if [[ ! -f "${lock}" ]]; then
   echo "error: ${lock} not found — the dependency pins live there" >&2

@@ -12,8 +12,8 @@ image:
 replicaCount: 1
 
 # Resource names default to <release>-kube-state-graph. The umbrella chart pins
-# fullnameOverride instead, because Grafana's datasource addresses this service
-# by URL and a URL cannot be templated from a subchart's values.
+# fullnameOverride instead, because the front door's nginx proxies to this
+# service by URL and a URL cannot be templated from a subchart's values.
 nameOverride: ''
 fullnameOverride: ''
 

@@ -55,7 +55,7 @@ Args: dict "root" $ "w" <workload entry>
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: {{ $root.Values.otlpEndpoint | quote }}
     # service.name becomes the `client` / `server` label on the service-graph
-    # series, i.e. the node label a viewer reads in the panel.
+    # series, i.e. the node label a viewer reads in the UI.
     - name: OTEL_RESOURCE_ATTRIBUTES
       value: "service.name={{ $w.name }},k8s.pod.uid=$(POD_UID),k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE)"
   {{- if $listens }}

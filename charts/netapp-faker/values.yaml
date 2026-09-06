@@ -30,6 +30,14 @@ storageClass: netapp-nas
 ontapCluster: ontap-lab
 ontapSVM: svm_demo
 
+# The provisioner's storagePrefix — what a FlexVol name carries in front of the
+# transformed PV name (`pvc-<uuid>` becomes `trident_pvc_<uuid with _>`).
+# kube-state-graph is never told this value: it suffix-matches, which is why a
+# real estate resolves without declaring the prefix and why several backends
+# with different prefixes all resolve. Change it and the storage chain must
+# survive; if it does not, the derivation is broken, not the value.
+ontapStoragePrefix: trident_
+
 interval: 15s
 lookback: 10m
 

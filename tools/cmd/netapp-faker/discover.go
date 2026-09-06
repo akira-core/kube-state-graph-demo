@@ -12,11 +12,12 @@ import (
 
 // claim is one Kubernetes PVC that should appear to have a NetApp backend.
 //
-// VolumeName is the whole join: kube-state-graph matches
-// kube_persistentvolumeclaim_info.volumename against volume_labels.volume_name
-// and nothing else. A claim still in Pending has no bound PV, hence no
-// VolumeName, and is skipped — inventing one would create a storage chain that
-// hangs off no claim.
+// VolumeName is the whole join: kube-state-graph rewrites
+// kube_persistentvolumeclaim_info.volumename into a match token and compares it
+// against the stock Harvest `volume` label, and nothing else. flexVolName is
+// this side of that derivation. A claim still in Pending has no bound PV, hence
+// no VolumeName, and is skipped — inventing one would create a storage chain
+// that hangs off no claim.
 type claim struct {
 	Cluster    string
 	Namespace  string

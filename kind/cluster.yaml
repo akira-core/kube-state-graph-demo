@@ -11,8 +11,9 @@ nodes:
       topology.kubernetes.io/zone: zone-a
       topology.kubernetes.io/region: local
     extraPortMappings:
-      # Grafana. The demo's front door. 3001 rather than 3000 so this can run
-      # beside the panel repo's own docker-compose demo, which owns 3000.
+      # The demo's front door: the standalone SPA behind nginx. 3001 rather
+      # than 3000 so this can run beside the frontend repo's own `npm run dev`,
+      # which owns 5173, and any other local UI on 3000.
       - containerPort: 30300
         hostPort: 3001
         protocol: TCP

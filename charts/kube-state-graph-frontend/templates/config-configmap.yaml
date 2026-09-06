@@ -1,0 +1,19 @@
+# The frontend fetches <origin>/config.json on every full page load. This is the
+# demo's copy of that file — tracked here, not taken from the frontend
+# repository's development default, so an edit made here is what the deployed
+# application reads.
+#
+# Mounted as a DIRECTORY, never with subPath: a subPath mount does not follow
+# ConfigMap updates, so editing this would need a pod restart to take effect.
+#
+# Nothing in here is a credential and nothing may become one: the browser
+# fetches this file verbatim.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-state-graph-frontend.fullname" . }}-config
+  labels:
+    {{- include "kube-state-graph-frontend.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {{- toPrettyJson .Values.config | nindent 4 }}

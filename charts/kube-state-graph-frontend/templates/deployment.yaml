@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-state-graph-frontend.fullname" . }}
+  labels:
+    {{- include "kube-state-graph-frontend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-state-graph-frontend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-state-graph-frontend.selectorLabels" . | nindent 8 }}
+      annotations:
+        # The nginx config is read once at start-up, so unlike the config.json
+        # ConfigMap it MUST restart the pod when it changes.
+        checksum/nginx: {{ include (print $.Template.BasePath "/nginx-secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      # A static bundle behind a reverse proxy. It reads no Kubernetes object.
+      automountServiceAccountToken: false
+      containers:
+        - name: frontend
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # KSG_API_PROXY_TARGET is deliberately NOT set. It makes the image's
+          # entrypoint write a `location /api/` into /tmp/api_proxy.conf, and
+          # the replacement nginx.conf mounted below defines that location
+          # itself. Setting it would only matter if the conf `include`d that
+          # file — which it must not, because two `location /api/` blocks make
+          # nginx refuse to start.
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          volumeMounts:
+            # A DIRECTORY mount, not subPath: subPath does not follow ConfigMap
+            # updates, so an edited config.json would need a pod restart.
+            - name: config
+              mountPath: /srv/config
+              readOnly: true
+            - name: nginx
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          livenessProbe:
+            # Answers without reading the config file or the backend, so it
+            # reports this server's readiness rather than the pipeline's.
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kube-state-graph-frontend.fullname" . }}-config
+        - name: nginx
+          secret:
+            secretName: {{ include "kube-state-graph-frontend.fullname" . }}-nginx
+      securityContext:
+        runAsNonRoot: true
+        # 101 is the nginx-unprivileged image's user. Numeric rather than the
+        # name for the same reason the backend pins 65532: with runAsNonRoot set
+        # and only a named user in the image, the kubelet cannot verify the user
+        # is non-root and refuses to start the container.
+        runAsUser: 101
+        runAsGroup: 101
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
