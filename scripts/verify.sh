@@ -450,6 +450,26 @@ else
   aggr_alert=$(jq '[.elements.nodes[] | select(.data.type == "netapp-aggr") | (.data.alerts // [])[] | select(.name == "NetAppAggregateFilling")] | length' <<<"${graph}")
   check "aggregate alert lands on the netapp-aggr" "$( [[ "${aggr_alert}" != "0" ]] && echo yes || echo no )" \
     "${aggr_alert} matched — aggr outranks node"
+
+  # The overlay is only half the story: the backend folds alert severity,
+  # NetApp health and Kubernetes readiness into ONE `data.status` verdict at
+  # build time, and the SPA colours every border from `node[status=...]` alone.
+  # A fold that stops running is invisible — the graph draws, every node is
+  # simply grey, and the alert that IS attached shows nowhere but the tooltip.
+  statused=$(jq '[.elements.nodes[] | select(.data.status != null)] | length' <<<"${graph}")
+  check "nodes carry a folded data.status" "$( [[ "${statused}" != "0" ]] && echo yes || echo no )" \
+    "${statused} nodes carry a status verdict"
+
+  # Severity has to SURVIVE the fold, not merely be present: a fold pinning
+  # everything to one value would pass the check above while flattening the
+  # very distinction the borders draw. The demo fires exactly one warning-only
+  # alert (NetAppAggregateFilling on the healthy aggr1) and one critical
+  # signal (ontap-lab-02, degraded AND alerting), so both bands must appear.
+  warn_n=$(jq '[.elements.nodes[] | select(.data.status == "warning")] | length' <<<"${graph}")
+  crit_n=$(jq '[.elements.nodes[] | select(.data.status == "critical")] | length' <<<"${graph}")
+  check "the fold keeps warning and critical apart" \
+    "$( [[ "${warn_n}" != "0" && "${crit_n}" != "0" ]] && echo yes || echo no )" \
+    "${warn_n} warning, ${crit_n} critical — both bands populated"
 fi
 
 echo

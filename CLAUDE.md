@@ -352,7 +352,19 @@ A demo where everything is green teaches nothing. These are intentional:
   becomes a coin toss.
 - The two controllers are deliberately different hardware under different load
   (AFF-A400 at 34% CPU vs an older FAS2720 at 78%). `data.perf` is carried raw
-  and never turned into a verdict: busy is not unhealthy.
+  and never turned into a verdict: busy is not unhealthy — the FAS2720 at 78%
+  still folds to `normal` unless a *different* signal says otherwise.
+- **The border colour is `data.status`, folded once by the backend — the SPA
+  derives nothing.** `graph.FoldStatus` is worst-wins over three signals: alert
+  severity, NetApp `health="degraded"` and Kubernetes `ready_status`. That makes
+  the estate read three ways at a glance and all three are populated on purpose:
+  `aggr1` is `warning` (healthy hardware, one firing warning alert), `aggr2` and
+  `ontap-lab-02` are `critical` (degraded health, and on the controller a firing
+  alert as well), everything else `normal`. A fold that stops running draws the
+  whole graph grey while every alert is still attached and every tooltip still
+  correct, so `verify.sh` §9 asserts both that `data.status` is present and that
+  the warning and critical bands stay distinct. Nodes that omit the key —
+  services, externals, SVMs, synthesised compounds — are not a regression.
 - Claims are placed on aggregates by RANK over the sorted claim list, not by
   hashing the PV name. Hashing kept a claim on one aggregate across restarts but
   let all three land on the same one by chance — which happened, leaving the

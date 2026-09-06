@@ -209,6 +209,15 @@ A demo where everything is green teaches nothing. These are on purpose:
   at 78% doing a third the ops at four times the latency. Those figures are
   carried through to `data.perf` raw and are never turned into a verdict —
   "busy" is not "unhealthy", and the pipeline must not decide otherwise.
+- **Every node's border colour is one baked verdict, not a UI guess.** The
+  backend folds alert severity, NetApp health and Kubernetes readiness into
+  `data.status` (`normal` / `warning` / `critical`) at build time, so `/v1/graph`
+  and `/v1/storage-graph` agree and the SPA only reads it. Performance
+  deliberately does not participate. The demo populates all three bands: `aggr1`
+  warns on a firing alert while its controller is healthy, `aggr2` and
+  `ontap-lab-02` are critical on degraded health, and everything else is normal.
+  `normal` means no negative signal was observed — not that every signal source
+  answered.
 - **`mongodb`'s Service is headless**, so its `cluster_ip` is `None` and it
   carries no ipaddress — again distinct from an unknown one.
 - **Shared NFS export capacity.** `csi-driver-nfs` reports `statfs` of the
