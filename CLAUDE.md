@@ -255,6 +255,12 @@ Before changing any of these, know what it removes:
   allowlist the annotation; there is no recording rule copying a tracking-id
   onto `kube_pod_owner`. If either collector or allowlist is dropped, that
   kind's pods keep their controller owners and lose application nesting.
+  Since the Sankey ends at the namespace, this annotation now has a SECOND
+  consumer: the view derives its `application` and `namespace` columns by
+  walking each drawn pod's `data.parent` to the compounds this join creates.
+  Losing it therefore costs two whole columns in a response that is still a
+  valid 200 carrying all five tiers — `verify.sh` §10 asserts every drawn pod
+  reaches both compounds, because the tier check alone cannot see this.
 - **The kube-state-metrics block is the reference config, not the subset this
   demo exercises.** All eleven collectors and all 22 series the backend queries
   are enabled, so the file can be lifted whole. Only the Deployment and
@@ -284,7 +290,10 @@ Before changing any of these, know what it removes:
   file behind it. Drop it and the in-app switch still works while every refresh,
   typed link and shared URL 404s — a break invisible to anyone who only clicks,
   which is why `verify.sh` §10 fetches both paths and asserts the document, not
-  just the status.
+  just the status. Only the two SCOPES are in the URL; the Sankey's `Layout`
+  control (`Flat` / `Node`) is page-transient by design, like the Graph's
+  pod-parent mode, so a shared link never carries it and a reload returns to
+  `Flat`.
 - **`cluster` / `az` / `env` / `namespace` options come from `kube_pod_info` on
   the single-node store**, reached at `/metrics-api/api/v1/label/<name>/values`
   through the front door's nginx. Never from the graph API's `clusters[]` (those

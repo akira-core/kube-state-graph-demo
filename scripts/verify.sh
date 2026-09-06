@@ -541,6 +541,9 @@ else
   # Every hop of the fixed tier chain. A missing tier is a Sankey that stops
   # short, and each one breaks for its own reason: node-aggr is the Harvest
   # aggregate leg, svm-pvc is the cross-store volume join, pod-node is kubelet.
+  # pod-node is still asserted even though the view no longer draws a node
+  # COLUMN: it is what the Layout control's `Node` position groups pods by, so
+  # losing it empties that control instead of leaving a gap in the diagram.
   missing=""
   for tier in node-aggr aggr-svm svm-pvc pvc-pod pod-node; do
     n=$(jq --arg t "${tier}" '[.elements.edges[]? | select(.data.labels.tier == $t)] | length' \
@@ -574,6 +577,35 @@ else
   else
     check "flow weights conserve tier to tier" no \
       "${summary} — the summation does not carry through"
+  fi
+
+  # The Sankey's two rightmost columns are DERIVED, not backend tiers. The
+  # backend deliberately emits no edge above the pod, so the view walks each
+  # drawn pod's `data.parent` chain up to its application and namespace
+  # compounds and sums that pod's conserved pvc-pod weight onto them. Those
+  # compounds exist only because kube-state-metrics collects the owning
+  # controller kind AND allowlists the ArgoCD tracking-id annotation on it.
+  # Drop either and this endpoint still answers 200 with all five tiers intact
+  # — the diagram simply loses its last two columns, which reads as an estate
+  # that groups nothing rather than as a trimmed allowlist.
+  resolved=$(jq -r '
+    (.elements.nodes | map({key: .data.id, value: .data}) | from_entries) as $n
+    | ([.elements.edges[]? | select(.data.labels.tier == "pvc-pod") | .data.target] | unique) as $pods
+    | [ $pods[]
+        | . as $pod
+        | [ $pod | recurse($n[.].parent // empty) | $n[.].type // empty ] as $chain
+        | select(($chain | index("application")) == null or ($chain | index("namespace")) == null)
+        | $pod ]
+    | "\(length) \($pods | length)"
+  ' /tmp/ksg-verify-storage.json 2>/dev/null || echo "0 0")
+  unresolved=${resolved%% *}
+  drawn=${resolved##* }
+  if [[ "${drawn}" != "0" && "${unresolved}" == "0" ]]; then
+    check "every drawn pod resolves an application and a namespace" yes \
+      "${drawn}/${drawn} pods reach both compounds through data.parent"
+  else
+    check "every drawn pod resolves an application and a namespace" no \
+      "${unresolved} of ${drawn} pods reach no application / namespace compound — the Sankey's two derived columns collapse; check the kube-state-metrics annotation allowlist"
   fi
 fi
 

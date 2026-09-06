@@ -408,6 +408,39 @@ and both are visible in the UI:
 **only** — `/v1/graph` still surfaces the SVM as the PVC's `svm` label and never
 draws a storage-flow edge.
 
+**What the view draws is not that tier chain one-for-one.** The diagram ends at
+the *namespace*, not at the Kubernetes node, in seven columns:
+
+```
+netapp-node → netapp-aggr → netapp-svm → pvc → pod → application → namespace
+```
+
+The first five are backend tiers, drawn at the weights the endpoint returns. The
+last two are **derived**: the backend deliberately emits no edge above the pod, so
+the view walks each drawn pod's `data.parent` chain up to the `application` and
+`namespace` compound nodes the same response already carries, and sums that pod's
+conserved `pvc-pod` weight onto them. It is the only client-side arithmetic in the
+view, it never writes back into a backend tier, and what it produces is marked
+"derived from member pods" in tooltips and in the summary tables.
+
+Those compounds are not free. They are here only because kube-state-metrics
+collects the owning controller kind **and** allowlists the ArgoCD tracking-id
+annotation on it — the same wiring that gives the graph view its application
+nesting. Trim either and `/v1/storage-graph` still answers 200 with all five tiers
+present, and the diagram quietly loses its two right-hand columns: it reads as an
+estate that groups nothing rather than as a trimmed allowlist. `make verify` §10
+asserts every drawn pod still reaches both.
+
+The Kubernetes node did not disappear, it changed job. As a column its ribbons
+only restated the `pvc-pod` weights of the pods sitting on it, so the diagram read
+as if the flow continued past the pod. It is now the **Layout** control: `Flat`
+draws pods loose, `Node` wraps each pod in the node it runs on — ordered by name,
+because a node is an inventory item you look up rather than rank by throughput,
+and ordering by flow would move one on every refresh. That choice is
+page-transient: unlike the scope pills beside it, it is not a URL parameter and
+does not survive a reload. `pod-node` is therefore still a required tier — losing
+it empties that control rather than putting a gap in the diagram.
+
 ## Troubleshooting
 
 Start with `make verify`. Nearly every failure mode in this pipeline is silent —
@@ -454,6 +487,8 @@ and therefore the last thing to appear.
 | `/readyz` is 503 naming a backend | that store is down or unreachable; the body names the backend, never its URL |
 | Sankey shows its empty state | `endpoints.storageGraph` is absent from `config.json`, or no `az`/`env` is selected — both are required and single-valued |
 | Sankey draws with a gap between two tiers | one leg of the chain is empty; `make verify` §10 names which tier has no edges |
+| Sankey stops at the Pod column — no Application / Namespace | the derived columns found no compound to walk to: kube-state-metrics has lost either the owning controller collector or the `argocd.argoproj.io/tracking-id` entry in `metricAnnotationsAllowList`. `make verify` §10 counts how many drawn pods resolve both |
+| Sankey's `Layout` → `Node` groups nothing | the `pod-node` tier is empty — that is the kubelet leg; `make verify` §10 names it |
 | No node carries `data.alerts` | `kubectl logs deployment/vmalert`; the `alerts` family must also be routed in `kube-state-graph.backends`, and ALERTS must carry `az`/`env` (it inherits them from the expression output) |
 | `data.alerts` is in the API body but the UI shows no alert | fixed in frontend `002b975`; on an older SPA image `parseAlerts` required the panel-era occurrence time and dropped every entry without one. The overlay's alerts carry no time, so the panel shows `n/a` in Count and Last occurred — that is the degraded form, not a missing reading |
 | A controller shows no model or CPU figure | the `node_labels` / `system_node` legs are optional and degrade silently — check `make verify` §6 |
