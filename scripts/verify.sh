@@ -629,18 +629,25 @@ else
   fi
 fi
 
-# The catalogue that validates ?edge_type=. The SPA populates its edge-type
-# control from it, so a control offering a value this does not list would be a
-# 400 rather than a narrowed graph.
-edge_path=$(jq -r '.endpoints.edgeTypes // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
-if [[ -n "${edge_path}" ]]; then
-  types=$(curl -sS --max-time 20 "${FRONTEND}${edge_path}" 2>/dev/null | jq -r '[.edge_types[].type] | length' 2>/dev/null || echo 0)
-  if [[ "${types}" =~ ^[0-9]+$ ]] && (( types > 0 )); then
-    check "edge-type catalogue answers through the front door" yes "${types} registered types"
-  else
-    check "edge-type catalogue answers through the front door" no \
-      "no types returned — the edge-type control would be empty"
-  fi
+# The withdrawn edge-type catalogue is asserted GONE, not present. `/v1/edge-types`
+# was removed with `?edge_type=`, and the backend ignores unknown parameters rather
+# than rejecting them — so a config still naming the endpoint, or a request still
+# sending the parameter, would claim a narrowing that never happens. A 404 here is
+# the correct answer; anything else means the front door is proxying a stale image.
+if jq -e 'has("endpoints") and (.endpoints | has("edgeTypes"))' /tmp/ksg-verify-config.json >/dev/null 2>&1; then
+  check "config.json does not name the withdrawn edge-type catalogue" no \
+    "endpoints.edgeTypes is still set — the SPA warns on the unknown key and the path is a 404"
+else
+  check "config.json does not name the withdrawn edge-type catalogue" yes "endpoints.edgeTypes absent"
+fi
+
+edge_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+  "${FRONTEND}/api/v1/edge-types" 2>/dev/null || echo 000)
+if [[ "${edge_code}" == "404" ]]; then
+  check "/v1/edge-types is withdrawn" yes "404 through the front door"
+else
+  check "/v1/edge-types is withdrawn" no \
+    "front door answered ${edge_code} — a stale backend image still serves the catalogue"
 fi
 
 echo

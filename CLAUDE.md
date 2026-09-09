@@ -19,19 +19,20 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. BOTH
-are currently on feature branches — the storage-flow work (`/v1/storage-graph`
-and the Sankey that draws it) is unmerged on both sides, and this demo is
-pinned to it:
+`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. Both
+track `main` — the storage-flow work (`/v1/storage-graph` and the Sankey that
+draws it) and the edge-type withdrawal have merged on both sides:
 
 | Submodule | Tracked branch |
 |---|---|
-| `kube-state-graph` | `feat/netapp-storage-graph-api-openspec` |
-| `kube-state-graph-frontend` | `feat/pure-ui-frontend` |
+| `kube-state-graph` | `main` |
+| `kube-state-graph-frontend` | `main` |
 
-Move the backend back to `main` once that branch merges; the pointer is a
-commit SHA either way, so `branch` only affects
-`git submodule update --remote`.
+The pointer is a commit SHA either way, so `branch` only affects
+`git submodule update --remote`. Point one at a feature branch to pin this demo
+to unmerged work, and move it back once that branch merges — a `branch` naming a
+branch the pinned SHA is not on (the usual shape after a squash merge) makes
+`--remote` walk the pointer BACKWARDS to the pre-merge head, silently.
 
 Each has its own `CLAUDE.md` with its own conventions — read the relevant one
 before editing inside it. Changes inside a submodule belong to *that* repository:
@@ -299,9 +300,14 @@ Before changing any of these, know what it removes:
   through the front door's nginx. Never from the graph API's `clusters[]` (those
   are composed `<az>-<env>-<cluster>` identities, not valid `?cluster=` values —
   feeding one back returns an empty 200) and never from the cluster store, which
-  holds no `kube_pod_info`. `edge_type` options come from `/v1/edge-types`, the
-  same registry the backend validates that parameter against, so an unregistered
-  value cannot be offered — it would be a 400, not a narrowed graph.
+  holds no `kube_pod_info`. There is **no edge-type control**: `/v1/edge-types`
+  and `?edge_type=` were withdrawn together. It is the withdrawn-parameter
+  failure above in its finished form — the backend now ignores `edge_type`
+  instead of validating it, so re-adding the control would offer options,
+  accept a selection and narrow nothing, with a 200 either way. Filter on each
+  edge's `data.type`, which every edge carries. `verify.sh` §10 asserts the
+  endpoint 404s and that `config.json` does not name it, because a stale
+  backend image answering the old route is the only way this looks fine.
 - **The window is built per request, not configured.** `/v1/graph` requires an
   absolute `start` and `end` and has no relative form, so the front end resolves
   its time selection at request time. A window baked into `endpoints.graph` would
