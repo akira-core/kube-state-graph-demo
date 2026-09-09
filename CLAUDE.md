@@ -19,19 +19,20 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. BOTH
-are currently on feature branches — the storage-flow work (`/v1/storage-graph`
-and the Sankey that draws it) is unmerged on both sides, and this demo is
-pinned to it:
+`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. Both
+track `main` — the storage-flow work (`/v1/storage-graph` and the Sankey that
+draws it) and the edge-type withdrawal have merged on both sides:
 
 | Submodule | Tracked branch |
 |---|---|
-| `kube-state-graph` | `feat/remove-edge-type-filter` |
-| `kube-state-graph-frontend` | `feat/remove-edge-type-filter` |
+| `kube-state-graph` | `main` |
+| `kube-state-graph-frontend` | `main` |
 
-Move the backend back to `main` once that branch merges; the pointer is a
-commit SHA either way, so `branch` only affects
-`git submodule update --remote`.
+The pointer is a commit SHA either way, so `branch` only affects
+`git submodule update --remote`. Point one at a feature branch to pin this demo
+to unmerged work, and move it back once that branch merges — a `branch` naming a
+branch the pinned SHA is not on (the usual shape after a squash merge) makes
+`--remote` walk the pointer BACKWARDS to the pre-merge head, silently.
 
 Each has its own `CLAUDE.md` with its own conventions — read the relevant one
 before editing inside it. Changes inside a submodule belong to *that* repository:

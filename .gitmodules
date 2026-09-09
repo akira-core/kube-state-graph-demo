@@ -1,8 +1,8 @@
 [submodule "kube-state-graph"]
 	path = kube-state-graph
 	url = https://github.com/akira-core/kube-state-graph
-	branch = feat/remove-edge-type-filter
+	branch = main
 [submodule "kube-state-graph-frontend"]
 	path = kube-state-graph-frontend
 	url = https://github.com/akira-core/kube-state-graph-frontend
-	branch = feat/remove-edge-type-filter
+	branch = main
