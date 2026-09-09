@@ -717,7 +717,6 @@ kube-state-graph-frontend:
       # composed `<az>-<env>-<cluster>` identity, and sending that back matches
       # no series and returns an empty 200.
       labelValues: /metrics-api
-      edgeTypes: /api/v1/edge-types
 
   proxy:
     graph: http://kube-state-graph:8080

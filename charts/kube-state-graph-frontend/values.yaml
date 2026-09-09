@@ -52,13 +52,14 @@ config:
     # Prometheus API ROOT (no /api/v1 suffix — that belongs to the API). The
     # identity filter controls read kube_pod_info label values from here.
     labelValues: /metrics-api
-    # The backend's edge-type catalogue, served from the same registry that
-    # validates ?edge_type=, so every option it offers is one the backend takes.
-    edgeTypes: /api/v1/edge-types
+    # No `edgeTypes` key. The backend withdrew /v1/edge-types together with
+    # ?edge_type=, and it ignores unknown parameters rather than rejecting
+    # them — so a key here would name a 404, the SPA would warn on it as an
+    # unknown endpoint, and re-adding the control would narrow nothing.
 
 # Where the two same-origin prefixes are forwarded, in-cluster.
 proxy:
-  # Everything under /api/ — the graph and the edge-type catalogue.
+  # Everything under /api/ — the graph and the storage graph.
   graph: http://kube-state-graph:8080
   # Only /metrics-api/api/v1/label/ is forwarded, and only with the basic-auth
   # credential attached server-side. Deliberately NOT the whole store: a

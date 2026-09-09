@@ -349,7 +349,7 @@ about the pipeline behind it.
 
 The SPA is two **pages**, not two tabs: `/graph` and `/sankey` are real URLs, `/`
 redirects to `/graph`, and each page carries its own scope in the query string
-(`?namespace=shop&edge_type=…` for the graph, `?az=…&env=…&mode=write` for the
+(`?namespace=shop&prune=false` for the graph, `?az=…&env=…&mode=write` for the
 Sankey, plus the shared `?from=&to=` window). A link is therefore reproducible —
 paste one and you land on the same view — which is what makes a bug report about
 this demo actionable.
@@ -368,7 +368,7 @@ forwards it in-cluster:
 
 | Browser asks | Reaches | Why not direct |
 |---|---|---|
-| `/api/v1/graph`, `/api/v1/storage-graph`, `/api/v1/edge-types` | `kube-state-graph:8080` | the backend would otherwise need a CORS policy naming this origin |
+| `/api/v1/graph`, `/api/v1/storage-graph` | `kube-state-graph:8080` | the backend would otherwise need a CORS policy naming this origin |
 | `/metrics-api/api/v1/label/<name>/values` | `vm-auth:8427`, with the basic-auth header attached in-cluster | the credential must never reach a browser |
 
 The filter bar sends what it collects straight to the backend. `cluster`, `az`,
@@ -376,12 +376,15 @@ The filter bar sends what it collects straight to the backend. `cluster`, `az`,
 **single-node** store — that is the raw name, which is what `?cluster=` accepts.
 `clusters[]` on the graph response is the composed identity `<az>-<env>-<cluster>`
 (`local-a-demo-ksg-demo` here) and is **not** a valid `?cluster=` value.
-`edge_type` options come from `/v1/edge-types`, which is the same registry the
-backend validates that parameter against. `Projection` is the backend's
-`?prune=`: **Traffic graph** (the default) draws only workload sitting on a
-connectivity edge, **Full inventory** draws every loaded pod plus the
-infrastructure nothing references — which is what `make verify` asserts against,
-so the two agree only in that position.
+There is no edge-type control. The backend withdrew `/v1/edge-types` and
+`?edge_type=` together, and it ignores unknown parameters rather than rejecting
+them — so a control still sending one would populate, accept a selection and
+narrow nothing, answering 200 either way. Filter on each edge's `data.type`,
+which every edge has always carried. `Projection` is the backend's `?prune=`:
+**Traffic graph** (the default) draws only workload sitting on a connectivity
+edge, **Full inventory** draws every loaded pod plus the infrastructure nothing
+references — which is what `make verify` asserts against, so the two agree only
+in that position.
 
 The time picker in the nav bar is the request window: the backend requires an
 absolute `start` and `end` on every call, and the front end resolves the
@@ -505,7 +508,7 @@ and therefore the last thing to appear.
 | Graph ids / cluster compound read `local-a-demo-ksg-demo` | expected: that is the composed identity `<az>-<env>-<cluster>` |
 | `?cluster=local-a-demo-ksg-demo` is empty | expected: `?cluster=` takes the raw name `ksg-demo`; pin with `?az=local-a&env=demo&cluster=ksg-demo` |
 | Cluster / AZ / Env / Namespace controls are empty | the `/metrics-api/` proxy is not reaching vmauth, or the `Authorization` header it attaches is wrong — check `global.ksgUpstreamAuth` and the front end's nginx Secret |
-| Edge-type control is empty | `/api/v1/edge-types` is not answering through the front door |
+| SPA console warns `unknown endpoint key: edgeTypes` | `charts/ksg-demo/values.yaml` still carries `endpoints.edgeTypes`; the catalogue was withdrawn — drop the key |
 | Backend logs "upstream backends did not answer" right after `make up` | expected: the server is ready before either store is, and it retries |
 
 ## Requirements
