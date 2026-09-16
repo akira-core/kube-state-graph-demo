@@ -700,8 +700,8 @@ fi
 
 # The Network category is the SPA's third data source, and the backend does not
 # serve it: there is no /v1/trace, so this demo leaves `endpoints.trace` out and
-# /network/* fetches nothing (only the Sankey view says why). Both directions
-# of drift are asserted. A config naming the endpoint while the backend 404s it
+# /network/* fetches nothing and says the endpoint is not configured. Both
+# directions of drift are asserted. A config naming the endpoint while the backend 404s it
 # gives the Network page a Query that always errors; a backend that starts
 # serving it while the config stays silent leaves a working view dark. This
 # request sends no hostname, so a real route may well refuse it: any status but

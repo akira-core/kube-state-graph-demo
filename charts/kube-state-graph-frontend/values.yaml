@@ -58,10 +58,9 @@ config:
     # unknown endpoint, and re-adding the control would narrow nothing.
     # No `trace` key either, for the opposite reason: the Network category
     # (/network/graph, /network/sankey) reads a /v1/trace endpoint that
-    # kube-state-graph does not serve. Absent, both pages fetch nothing (the
-    # Sankey view says the endpoint is not configured; the Graph view does not);
-    # named, every Network Query would 404. verify.sh §10 fails in either
-    # direction the two disagree.
+    # kube-state-graph does not serve. Absent, both pages fetch nothing and say
+    # the endpoint is not configured; named, every Network Query would 404.
+    # verify.sh §10 fails in either direction the two disagree.
 
 # Where the two same-origin prefixes are forwarded, in-cluster.
 proxy:

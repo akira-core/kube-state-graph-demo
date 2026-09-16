@@ -362,13 +362,10 @@ this demo actionable.
 **The Network category is present but dark here.** `/network/graph` and
 `/network/sankey` trace a switch's traffic from a `GET /v1/trace`-style endpoint
 the SPA reads from `endpoints.trace`. kube-state-graph serves no such route, so
-this demo's `config.json` leaves the key out: neither page fetches anything and
-the Storage pages are unaffected. Only `/network/sankey` *says* so, with the
-frontend's "Trace endpoint is not configured" notice. `/network/graph` keeps
-reading "Nothing has been requested yet", and once a hostname is typed its Query
-enables and does nothing — the frontend's Graph view has no unconfigured state,
-so do not take that page's silence for a broken pipeline. Naming the key anyway
-would give Network a Query that always 404s; `verify.sh` §10 asserts the
+this demo's `config.json` leaves the key out: neither page fetches anything, both
+say "Trace endpoint is not configured" before and after Query, and the Storage
+pages are unaffected. Naming the key anyway would give Network a Query that
+always 404s; `verify.sh` §10 asserts the
 config and the backend agree, in both directions, so a backend that starts
 serving the route turns the check red instead of leaving a working view unwired.
 
@@ -553,7 +550,8 @@ and therefore the last thing to appear.
 | Sankey stops at the Pod column — no Application / Namespace | the derived columns found no compound to walk to: kube-state-metrics has lost either the owning controller collector or the `argocd.argoproj.io/tracking-id` entry in `metricAnnotationsAllowList`. `make verify` §10 counts how many drawn pods resolve both |
 | Sankey's `Layout` → `Node` groups nothing | the `pod-node` tier is empty — that is the kubelet leg; `make verify` §10 names it |
 | Sankey's `SVM` → `Group` is disabled | the storage graph's PVCs carry no `labels.aggr` — the backend image predates `expose-claim-aggregate`; `make redeploy-backend`. `make verify` §10 counts the claims that name their aggregate |
-| Network Sankey says the trace endpoint is not configured; Network Graph's Query does nothing | expected: kube-state-graph serves no `/v1/trace`, so `endpoints.trace` is deliberately absent. Only the Sankey view names that state — the Graph view keeps its "Nothing has been requested yet" message. `make verify` §10 fails if the backend starts serving the route |
+| Network Graph / Sankey say the trace endpoint is not configured | expected: kube-state-graph serves no `/v1/trace`, so `endpoints.trace` is deliberately absent. `make verify` §10 fails if the backend starts serving the route |
+| Network Graph says "Nothing has been requested yet" and its Query does nothing | the front-door image predates frontend `fix/network-graph-unconfigured`, whose Graph view had no unconfigured state — `make redeploy-frontend` |
 | No node carries `data.alerts` | `kubectl logs deployment/vmalert`; the `alerts` family must also be routed in `kube-state-graph.backends`, and ALERTS must carry `az`/`env` (it inherits them from the expression output) |
 | `data.alerts` is in the API body but the UI shows no alert | fixed in frontend `002b975`; on an older SPA image `parseAlerts` required the panel-era occurrence time and dropped every entry without one. The overlay's alerts carry no time, so the panel shows `n/a` in Count and Last occurred — that is the degraded form, not a missing reading |
 | A controller shows no model or CPU figure | the `node_labels` / `system_node` legs are optional and degrade silently — check `make verify` §6 |

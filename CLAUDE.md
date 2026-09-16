@@ -19,14 +19,16 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. Both
-track `main` — the storage-flow work (`/v1/storage-graph` and the Sankey that
-draws it) and the edge-type withdrawal have merged on both sides:
+`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. The
+backend tracks `main`. The frontend is pinned to unmerged work — the Network
+Graph view's unconfigured-endpoint state (akira-core/kube-state-graph-frontend#14),
+which the dark Network category below depends on — and moves back to `main`
+once that PR merges:
 
 | Submodule | Tracked branch |
 |---|---|
 | `kube-state-graph` | `main` |
-| `kube-state-graph-frontend` | `main` |
+| `kube-state-graph-frontend` | `fix/network-graph-unconfigured` |
 
 The pointer is a commit SHA either way, so `branch` only affects
 `git submodule update --remote`. Point one at a feature branch to pin this demo
@@ -318,14 +320,12 @@ Before changing any of these, know what it removes:
 - **The Network category is dark on purpose — `endpoints.trace` stays out of
   `config.json`.** Its two pages draw a switch trace from a `/v1/trace`-style
   endpoint, and kube-state-graph serves no such route. Absent, neither page
-  fetches and the Storage pages are untouched — but only `/network/sankey` says
-  "Trace endpoint is not configured"; `/network/graph` keeps "Nothing has been
-  requested yet" and, once a hostname is typed, offers a Query that does
-  nothing. That silence is the frontend's Graph view lacking an unconfigured
-  state, not a broken pipeline. Named, every Network Query 404s. `verify.sh` §10 asserts the
-  config and the backend agree in BOTH directions: a backend that starts
-  answering `/api/v1/trace` with anything but 404 turns the check red, so the
-  route gets wired here instead of sitting unreachable behind a dark page.
+  fetches, both say "Trace endpoint is not configured" before and after Query,
+  and the Storage pages are untouched. Named, every Network Query 404s.
+  `verify.sh` §10 asserts the config and the backend agree in BOTH directions:
+  a backend that starts answering `/api/v1/trace` with anything but 404 turns
+  the check red, so the route gets wired here instead of sitting unreachable
+  behind a dark page.
 - **The Sankey's `SVM` → `Group` reads the PVC's `labels.aggr`, and nothing
   else can answer it.** The tier chain sums the per-claim aggregate away at the
   SVM, and this estate's single SVM (`svm_demo`) holds claims on both
