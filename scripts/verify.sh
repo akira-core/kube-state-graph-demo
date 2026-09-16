@@ -500,15 +500,18 @@ fi
 code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "${FRONTEND}/healthz" 2>/dev/null || echo 000)
 check "front door answers /healthz" "$( [[ "${code}" == 200 ]] && echo yes || echo no )" "HTTP ${code}"
 
-# The SPA is two PAGES, not two tabs: /graph and /sankey are real URLs the
+# The SPA is PAGES, not tabs: /graph and /sankey (the Storage category) and
+# /network/graph and /network/sankey (the Network category) are real URLs the
 # router owns, and each carries its own scope in the query string. Only the
 # nginx history fallback (`try_files $uri $uri/ /index.html`) makes them
 # reachable by a full page load — a typed link, a refresh, a shared URL. Without
 # it nginx looks for a file called `sankey`, finds none, and answers 404: the
 # in-app nav still works, so the break is invisible to anyone who only ever
-# clicks. Assert the document, not merely the status, because a 200 carrying
-# the wrong body would pass a status-only check.
-for route in graph sankey; do
+# clicks. The Network pair is asserted too: it is one path segment deeper, and
+# it stays reachable even though this demo gives it no data source. Assert the
+# document, not merely the status, because a 200 carrying the wrong body would
+# pass a status-only check.
+for route in graph sankey network/graph network/sankey; do
   body=$(curl -sS --max-time 20 -w '\n%{http_code}' "${FRONTEND}/${route}" 2>/dev/null || echo $'\n000')
   code=${body##*$'\n'}
   if [[ "${code}" == 200 ]] && grep -qi '<div id="root"' <<<"${body}"; then
@@ -517,6 +520,27 @@ for route in graph sankey; do
     check "front door deep-links to /${route}" no \
       "HTTP ${code} — the nginx history fallback is gone, so a refresh or a shared /${route} link 404s"
   fi
+done
+
+# The nginx conf is the chart's own copy, not the image's, so the image's
+# hardening holds only as long as that copy restates it — and two parts of it
+# fail silently. The security headers: nginx does not inherit add_header into
+# a block that declares its own, so a location that drops the include serves
+# without a policy and nothing errors. The proxy scope: /api/metrics is the
+# backend's own registry, and a /metrics-api/ path outside label enumeration
+# would otherwise fall through to the SPA fallback as a 200 carrying index.html.
+csp=$(curl -sS -D - -o /dev/null --max-time 20 "${FRONTEND}/sankey" 2>/dev/null \
+  | tr -d '\r' | grep -i '^content-security-policy:' || true)
+if grep -q "default-src 'self'" <<<"${csp}"; then
+  check "front door sends the image's security headers" yes "Content-Security-Policy on /sankey"
+else
+  check "front door sends the image's security headers" no \
+    "no Content-Security-Policy on /sankey — the nginx Secret has lost the security-headers.conf include"
+fi
+for path in /api/metrics '/metrics-api/api/v1/query?query=up'; do
+  code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "${FRONTEND}${path}" 2>/dev/null || echo 000)
+  check "front door does not forward ${path%%\?*}" "$( [[ "${code}" == 404 ]] && echo yes || echo no )" \
+    "HTTP ${code}, expected 404"
 done
 
 graph_path=$(jq -r '.endpoints.graph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
@@ -544,18 +568,38 @@ fi
 # and its body is a storage-flow DAG whose tiers each have to be present for the
 # diagram to draw. A response that is 200 but missing a tier renders as a Sankey
 # with a gap, which looks like an estate fact rather than a broken pipeline.
+lv_base=$(jq -r '.endpoints.labelValues // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
 storage_path=$(jq -r '.endpoints.storageGraph // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
 if [[ -z "${storage_path}" ]]; then
   check "config names a storage-graph endpoint" no \
     "endpoints.storageGraph is absent — the Sankey view is disabled and shows its empty state"
 else
-  code=$(curl -sS --max-time 30 -o /tmp/ksg-verify-storage.json -w '%{http_code}' \
-    "${FRONTEND}${storage_path}?start=$(( now - 900 ))&end=${now}&az=${KSG_AZ}&env=${KSG_ENV}" 2>/dev/null || echo 000)
+  # Rooted, the way the Sankey asks. The page sends nothing until az, env AND
+  # at least one root are chosen and Query is pressed; the backend still
+  # answers a rootless request, so asking for one here would stay green while
+  # testing a request the front door can no longer make. The roots are every
+  # Kubernetes node, from the same label-values call the root control
+  # enumerates — the whole estate in this demo, so the tier, conservation and
+  # derived-column checks below keep their meaning. Reset the body first: a
+  # skipped request must not leave the previous run's for those checks.
+  roots=$(curl -sS --max-time 20 \
+    "${FRONTEND}${lv_base}/api/v1/label/node/values?match[]=kube_pod_info" 2>/dev/null \
+    | jq -r '[.data[]? | "node=" + @uri] | join("&")' 2>/dev/null || true)
+  echo '{}' > /tmp/ksg-verify-storage.json
+  code=000
+  if [[ -n "${roots}" ]]; then
+    code=$(curl -sS --max-time 30 -o /tmp/ksg-verify-storage.json -w '%{http_code}' \
+      "${FRONTEND}${storage_path}?start=$(( now - 900 ))&end=${now}&az=${KSG_AZ}&env=${KSG_ENV}&${roots}" 2>/dev/null || echo 000)
+  fi
   if [[ "${code}" == 200 ]]; then
-    check "storage graph answers through the front door (${storage_path})" yes "HTTP ${code}"
+    check "storage graph answers through the front door (${storage_path})" yes \
+      "HTTP ${code}, rooted on ${roots//&/ }"
+  elif [[ -z "${roots}" ]]; then
+    check "storage graph answers through the front door (${storage_path})" no \
+      "no node root candidates via ${lv_base:-<no labelValues>} — the Sankey has no root to Query with"
   else
     check "storage graph answers through the front door (${storage_path})" no \
-      "HTTP ${code} — nginx /api/ is not reaching /v1/storage-graph, or az/env were rejected"
+      "HTTP ${code} — nginx /api/ is not reaching /v1/storage-graph, or az/env/roots were rejected"
   fi
 
   # Every hop of the fixed tier chain. A missing tier is a Sankey that stops
@@ -627,6 +671,55 @@ else
     check "every drawn pod resolves an application and a namespace" no \
       "${unresolved} of ${drawn} pods reach no application / namespace compound — the Sankey's two derived columns collapse; check the kube-state-metrics annotation allowlist"
   fi
+
+  # The Sankey's `SVM` control (`Column` / `Group`) draws each claim straight
+  # from ITS aggregate, which the storage chain alone cannot say: aggr → svm →
+  # pvc sums the per-claim aggregate away at the SVM. It reads that from the
+  # PVC's `labels.aggr` — the id of a netapp-aggr node in the same body — and a
+  # body carrying no such label presents `Group` disabled while `Column` keeps
+  # drawing, so a stale backend image looks like a control nobody uses. Every
+  # claim on the svm-pvc tier must name an aggregate the body holds, and the
+  # claims must span more than one: this estate's single SVM holds claims on
+  # both aggregates, which is the only shape `Group` has anything to say about.
+  aggr_claims=$(jq -r '
+    ([.elements.nodes[]? | select(.data.type == "netapp-aggr") | .data.id]) as $aggrs
+    | ([.elements.nodes[]? | {key: .data.id, value: .data}] | from_entries) as $n
+    | ([.elements.edges[]? | select(.data.labels.tier == "svm-pvc") | .data.target] | unique) as $pvcs
+    | [ $pvcs[] | $n[.].labels.aggr // empty | select(. as $a | $aggrs | index($a) != null) ] as $named
+    | "\($named | length) \($pvcs | length) \($named | unique | length)"
+  ' /tmp/ksg-verify-storage.json 2>/dev/null || echo "0 0 0")
+  read -r named claims spanned <<<"${aggr_claims}"
+  if [[ "${claims}" != "0" && "${named}" == "${claims}" && "${spanned}" -ge 2 ]]; then
+    check "every claim names its aggregate (labels.aggr)" yes \
+      "${named}/${claims} claims, across ${spanned} aggregates"
+  else
+    check "every claim names its aggregate (labels.aggr)" no \
+      "${named} of ${claims} claims name an aggregate in the body, across ${spanned} — the Sankey's SVM Group presents disabled; a backend image older than expose-claim-aggregate?"
+  fi
+fi
+
+# The Network category is the SPA's third data source, and the backend does not
+# serve it: there is no /v1/trace, so this demo leaves `endpoints.trace` out and
+# /network/* fetches nothing and says the endpoint is not configured. Both
+# directions of drift are asserted. A config naming the endpoint while the backend 404s it
+# gives the Network page a Query that always errors; a backend that starts
+# serving it while the config stays silent leaves a working view dark. This
+# request sends no hostname, so a real route may well refuse it: any status but
+# 404 counts as the route existing.
+trace_path=$(jq -r '.endpoints.trace // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+trace_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+  "${FRONTEND}${trace_path:-/api/v1/trace}" 2>/dev/null || echo 000)
+if [[ -z "${trace_path}" && "${trace_code}" == 404 ]]; then
+  check "Network trace endpoint matches the backend" yes \
+    "endpoints.trace absent and /api/v1/trace 404s — /network/* is dark by design"
+elif [[ -n "${trace_path}" && "${trace_code}" != 404 && "${trace_code}" != 000 ]]; then
+  check "Network trace endpoint matches the backend" yes "${trace_path} answers HTTP ${trace_code}"
+elif [[ -z "${trace_path}" ]]; then
+  check "Network trace endpoint matches the backend" no \
+    "endpoints.trace absent but /api/v1/trace answers HTTP ${trace_code} — the backend now serves it; wire it in the front door's config"
+else
+  check "Network trace endpoint matches the backend" no \
+    "endpoints.trace=${trace_path} answers HTTP ${trace_code} — every Network Query would error"
 fi
 
 # The withdrawn edge-type catalogue is asserted GONE, not present. `/v1/edge-types`
@@ -651,21 +744,26 @@ else
 fi
 
 echo
-echo "== 11. filter options come from the SINGLE-NODE store, through the front door =="
+echo "== 11. filter and root options come from the SINGLE-NODE store, through the front door =="
 # The four identity controls read kube_pod_info label values. They must reach
 # the store that HOLDS that family (single-node, behind vmauth) and they must
 # offer the RAW cluster name: the graph response's clusters[] is the composed
 # <az>-<env>-<cluster> identity, and feeding that back as ?cluster= returns an
 # empty 200 — a filter that appears to work and moves nothing.
 #
+# The Sankey's root control reads two more on demand: `node` for the whole
+# estate (§10 already queries with those values), and `pod` scoped to the
+# selected namespace — the one call whose match[] carries a matcher,
+# kube_pod_info{namespace="…"}, so it is asserted on its own below.
+#
 # The credential is attached by the front door's nginx, in-cluster. This curl
-# deliberately sends none: if it needed one, so would the browser.
-lv_base=$(jq -r '.endpoints.labelValues // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
+# deliberately sends none: if it needed one, so would the browser. `lv_base`
+# was read from config.json in §10.
 if [[ -z "${lv_base}" ]]; then
   check "config names a label-values endpoint" no \
     "endpoints.labelValues is absent — the identity controls would be empty"
 else
-  for dim in cluster az env namespace; do
+  for dim in cluster az env namespace node; do
     body=$(curl -sS --max-time 20 \
       "${FRONTEND}${lv_base}/api/v1/label/${dim}/values?match[]=kube_pod_info" 2>/dev/null || true)
     count=$(jq -r '.data | length' <<<"${body}" 2>/dev/null || echo 0)
@@ -676,6 +774,16 @@ else
         "$(jq -c '.' <<<"${body}" 2>/dev/null || echo "unreadable") — no credential attached, or the wrong store"
     fi
   done
+
+  pods=$(curl -sS --max-time 20 -G "${FRONTEND}${lv_base}/api/v1/label/pod/values" \
+    --data-urlencode 'match[]=kube_pod_info{namespace="shop"}' 2>/dev/null || true)
+  count=$(jq -r '.data | length' <<<"${pods}" 2>/dev/null || echo 0)
+  if jq -e '.status == "success"' <<<"${pods}" >/dev/null 2>&1 && [[ "${count}" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+    check "\$pod root candidates for namespace shop" yes "${count} pods"
+  else
+    check "\$pod root candidates for namespace shop" no \
+      "$(jq -c '.' <<<"${pods}" 2>/dev/null || echo "unreadable") — the Sankey's pod root would list nothing"
+  fi
 
   clusters=$(curl -sS --max-time 20 \
     "${FRONTEND}${lv_base}/api/v1/label/cluster/values?match[]=kube_pod_info" 2>/dev/null || true)

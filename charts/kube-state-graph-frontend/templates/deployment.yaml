@@ -46,6 +46,12 @@ spec:
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
               readOnly: true
+            # The only writable path. The root filesystem is read-only, so the
+            # entrypoint's generated proxy files, the pid file and nginx's temp
+            # files all land here — which is why the nginx Secret keeps `pid`
+            # and every `*_temp_path` under /tmp.
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             # Answers without reading the config file or the backend, so it
             # reports this server's readiness rather than the pipeline's.
@@ -62,6 +68,9 @@ spec:
           {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
+            # The image serves from a read-only root by design: its runtime user
+            # owns neither the bundle nor its config, and writes only to /tmp.
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
       volumes:
@@ -71,6 +80,8 @@ spec:
         - name: nginx
           secret:
             secretName: {{ include "kube-state-graph-frontend.fullname" . }}-nginx
+        - name: tmp
+          emptyDir: {}
       securityContext:
         runAsNonRoot: true
         # 101 is the nginx-unprivileged image's user. Numeric rather than the

@@ -5,4 +5,4 @@
 [submodule "kube-state-graph-frontend"]
 	path = kube-state-graph-frontend
 	url = https://github.com/akira-core/kube-state-graph-frontend
-	branch = main
+	branch = fix/network-graph-unconfigured

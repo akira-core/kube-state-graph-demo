@@ -19,14 +19,16 @@ every edge type, troubleshooting table). Read it before changing pipeline wiring
 
 ## Submodules
 
-`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. Both
-track `main` — the storage-flow work (`/v1/storage-graph` and the Sankey that
-draws it) and the edge-type withdrawal have merged on both sides:
+`kube-state-graph/` and `kube-state-graph-frontend/` are git submodules. The
+backend tracks `main`. The frontend is pinned to unmerged work — the Network
+Graph view's unconfigured-endpoint state (akira-core/kube-state-graph-frontend#14),
+which the dark Network category below depends on — and moves back to `main`
+once that PR merges:
 
 | Submodule | Tracked branch |
 |---|---|
 | `kube-state-graph` | `main` |
-| `kube-state-graph-frontend` | `main` |
+| `kube-state-graph-frontend` | `fix/network-graph-unconfigured` |
 
 The pointer is a commit SHA either way, so `branch` only affects
 `git submodule update --remote`. Point one at a feature branch to pin this demo
@@ -79,8 +81,9 @@ change works without running it.
 Host requirements: `docker`, `kind`, `kubectl`, `helm`, `jq`, `curl`, `git`. Go and
 Node are **not** needed — both builds run inside Docker.
 
-Entry points: the front door <http://localhost:3001> (the SPA — Graph, from
-`/v1/graph`, and Sankey, from `/v1/storage-graph`), Graph API
+Entry points: the front door <http://localhost:3001> (the SPA — Storage's Graph,
+from `/v1/graph`, and Sankey, from `/v1/storage-graph`; its Network category has
+no data source here), Graph API
 <http://localhost:18080/docs>, and **two** metric stores — vmselect
 <http://localhost:18481/select/0/prometheus> (Harvest, service-graph) and vmauth
 <http://localhost:18427> (kube-state-metrics, kubelet; needs
@@ -157,6 +160,20 @@ attached in-cluster. The credential therefore never reaches a browser, and the
 backend needs no CORS policy. Do **not** also set `KSG_API_PROXY_TARGET`: that
 makes the image's entrypoint write a second `location /api/`, and nginx refuses
 to start on a duplicate location.
+
+Because the conf is replaced rather than extended, **the image's hardening
+holds only as long as the Secret restates it**: `include
+/etc/nginx/security-headers.conf;` in the server block and in every location
+(nginx does not inherit `add_header` into a block that declares its own, so a
+dropped include serves without a policy and nothing errors), GET/HEAD-only
+proxies that hide the upstream's copies of those headers, a 404 for
+`/api/metrics` and for every `/metrics-api/` path outside label enumeration,
+and `pid` plus every `*_temp_path` under `/tmp` because the pod runs a read-only
+root. When the image's `docker/nginx.conf` or `docker/entrypoint.sh` changes,
+bring the Secret along; `verify.sh` §10 asserts the policy header and both
+404s. The image's `KSG_AZ_LABEL` / `KSG_ENV_LABEL` rebinding lives in the proxy
+file its entrypoint generates, which this conf does not include — inert here,
+and unneeded while the external labels are literally `az` / `env`.
 
 **Chart dependencies are vendored unpacked, and `make deps` is offline.** The
 upstream subcharts live under `charts/ksg-demo/charts/` as tracked
@@ -284,17 +301,41 @@ Before changing any of these, know what it removes:
   control is gone. `verify.sh` §10 therefore requests the graph **through the
   front door's own origin**, not against the backend directly — proxying is part
   of what is under test and a 404 there is invisible from the backend side.
-- **The SPA is two ROUTES, and only the nginx history fallback makes them
-  reachable.** `/graph` and `/sankey` are URLs the router owns, each carrying its
-  own scope in the query string; `/` redirects to `/graph`. `try_files $uri $uri/
-  /index.html` in the nginx Secret is what serves `index.html` for a path with no
-  file behind it. Drop it and the in-app switch still works while every refresh,
-  typed link and shared URL 404s — a break invisible to anyone who only clicks,
-  which is why `verify.sh` §10 fetches both paths and asserts the document, not
-  just the status. Only the two SCOPES are in the URL; the Sankey's `Layout`
+- **The SPA is four ROUTES in two categories, and only the nginx history
+  fallback makes them reachable.** Storage is `/graph` and `/sankey`, Network is
+  `/network/graph` and `/network/sankey`; each is a URL the router owns carrying
+  its own scope in the query string, `/` redirects to `/graph` and `/network` to
+  `/network/graph`. `try_files $uri $uri/ /index.html` in the nginx Secret is
+  what serves `index.html` for a path with no file behind it. Drop it and the
+  in-app switch still works while every refresh, typed link and shared URL 404s
+  — a break invisible to anyone who only clicks, which is why `verify.sh` §10
+  fetches all four paths and asserts the document, not just the status. The URL
+  is the **applied** scope — written in one replace
+  when Query commits, never on an edit — and mounting a page never requests: a
+  deep link, a refresh and a route switch all prefill the draft and wait for
+  Query. The Sankey's URL also carries `mode` and `top_pods`; its `Layout`
   control (`Flat` / `Node`) is page-transient by design, like the Graph's
   pod-parent mode, so a shared link never carries it and a reload returns to
-  `Flat`.
+  `Flat`. Its `SVM` control (`Column` / `Group`) is page-transient the same way.
+- **The Network category is dark on purpose — `endpoints.trace` stays out of
+  `config.json`.** Its two pages draw a switch trace from a `/v1/trace`-style
+  endpoint, and kube-state-graph serves no such route. Absent, neither page
+  fetches, both say "Trace endpoint is not configured" before and after Query,
+  and the Storage pages are untouched. Named, every Network Query 404s.
+  `verify.sh` §10 asserts the config and the backend agree in BOTH directions:
+  a backend that starts answering `/api/v1/trace` with anything but 404 turns
+  the check red, so the route gets wired here instead of sitting unreachable
+  behind a dark page.
+- **The Sankey's `SVM` → `Group` reads the PVC's `labels.aggr`, and nothing
+  else can answer it.** The tier chain sums the per-claim aggregate away at the
+  SVM, and this estate's single SVM (`svm_demo`) holds claims on both
+  aggregates, so only `labels.aggr` — the id of a `netapp-aggr` node in the same
+  body, stamped by the backend from the pick that draws `pvc-to-netapp-aggr` —
+  says which one a claim is on. A body without it presents `Group` disabled
+  while `Column` keeps drawing: a stale backend image looks like a control
+  nobody uses. `verify.sh` §10 asserts every `svm-pvc` claim names an aggregate
+  the body holds and that the claims span more than one — which is also why the
+  faker places claims by rank rather than by hash (below).
 - **`cluster` / `az` / `env` / `namespace` options come from `kube_pod_info` on
   the single-node store**, reached at `/metrics-api/api/v1/label/<name>/values`
   through the front door's nginx. Never from the graph API's `clusters[]` (those
@@ -308,6 +349,17 @@ Before changing any of these, know what it removes:
   edge's `data.type`, which every edge carries. `verify.sh` §10 asserts the
   endpoint 404s and that `config.json` does not name it, because a stale
   backend image answering the old route is the only way this looks fine.
+- **The Sankey requires a root, so `verify.sh` §10 sends one.** The page issues
+  no `/v1/storage-graph` request until `az`, `env` and at least one root are in
+  the draft and Query is pressed. The backend still answers a rootless request
+  with the whole estate, so a harness asking for one stays green while testing
+  a request the front door can no longer make. §10 roots on every Kubernetes
+  node, from the same `/metrics-api/api/v1/label/node/values` call the root
+  control enumerates — the whole estate here, so the tier, conservation and
+  derived-column checks keep their meaning — and §11 asserts the
+  namespace-scoped `pod` candidates, the one label-values call whose `match[]`
+  carries a matcher. `Top pods` (default 10) is client-side and never sent;
+  with three claim-carrying pods the cut never engages here.
 - **The window is built per request, not configured.** `/v1/graph` requires an
   absolute `start` and `end` and has no relative form, so the front end resolves
   its time selection at request time. A window baked into `endpoints.graph` would
