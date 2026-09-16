@@ -56,6 +56,12 @@ config:
     # ?edge_type=, and it ignores unknown parameters rather than rejecting
     # them — so a key here would name a 404, the SPA would warn on it as an
     # unknown endpoint, and re-adding the control would narrow nothing.
+    # No `trace` key either, for the opposite reason: the Network category
+    # (/network/graph, /network/sankey) reads a /v1/trace endpoint that
+    # kube-state-graph does not serve. Absent, both pages fetch nothing (the
+    # Sankey view says the endpoint is not configured; the Graph view does not);
+    # named, every Network Query would 404. verify.sh §10 fails in either
+    # direction the two disagree.
 
 # Where the two same-origin prefixes are forwarded, in-cluster.
 proxy:
