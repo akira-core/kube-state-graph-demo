@@ -28,6 +28,7 @@ spec:
     metadata:
       labels:
         {{- include "demo-workloads.podLabels" $w | nindent 8 }}
+        {{- include "demo-workloads.appMetadataLabels" (dict "root" $ "w" $w) | nindent 8 }}
     spec:
       # These pods never call the Kubernetes API; the graph is assembled from
       # metrics, not from anything the workload itself looks up.

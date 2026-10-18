@@ -30,13 +30,15 @@ promURL: ''
 #                query spans, and in the /readyz failure body. Also the merge
 #                order key — backends contribute in ascending name order.
 #   url          absolute http/https query endpoint
-#   families     non-empty subset of: ksm, kubelet, harvest, servicegraph, probe.
-#                A family served by NO backend is a validation error, not a
-#                degrade: its queries would have nowhere to go and the empty
-#                vector that produced is indistinguishable from an estate that
-#                genuinely holds nothing.
+#   families     non-empty subset of: ksm, kubelet, harvest, servicegraph, probe,
+#                alerts, appmeta. A REQUIRED family (the first five) served by NO
+#                backend is a validation error, not a degrade: its queries would
+#                have nowhere to go and the empty vector that produced is
+#                indistinguishable from an estate that genuinely holds nothing.
+#                `alerts` and `appmeta` are optional; a table serving either on
+#                no backend loads.
 #   zones        optional; the `az` values this backend holds. Omitted means
-#                every zone. Only ksm / kubelet / harvest are zone-routed —
+#                every zone. Only ksm / kubelet / harvest / appmeta are zone-routed —
 #                servicegraph and probe accept no az dimension, so an az-scoped
 #                request still reaches every backend serving them.
 #   usernameEnv  optional; NAME of the env var holding this backend's basic-auth
@@ -48,6 +50,21 @@ backends: []
 # fails to parse or validate is rejected wholesale and the previous table keeps
 # serving; an invalid file at startup is fatal instead.
 backendsReloadInterval: 30s
+
+# Optional per-pod application-metadata metric (--app-metadata-metric). It adds
+# the pod's Application (winning over the controller-annotation chain),
+# `data.namespace_owner` on namespace groups and `data.deployed_by` on
+# application groups. Empty issues no query and leaves every body unchanged. A
+# metric named while NO backend serves the `appmeta` family logs one Warn at
+# startup and behaves as unset.
+#
+# `labels` is a comma-separated field=label list (--app-metadata-labels) over
+# app, user, ns_owner, namespace and pod; a field it omits keeps the backend's
+# default (argocd_app, user, owner, namespace, pod). Requires `metric`. Every
+# row must carry the same az / env as its pod's kube-state-metrics series.
+appMetadata:
+  metric: ''
+  labels: ''
 
 listenAddr: ':8080'
 logLevel: info

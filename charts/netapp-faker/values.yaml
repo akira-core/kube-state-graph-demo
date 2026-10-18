@@ -41,9 +41,11 @@ ontapStoragePrefix: trident_
 interval: 15s
 lookback: 10m
 
-# Stamped onto every emitted series. kube-state-graph pushes ?az= / ?env= to
-# upstream PromQL as raw matchers against EVERY topology family, so a Harvest
-# series missing them silently drops out of any filtered request.
+# Stamped onto every emitted series. kube-state-graph renders no az / env matcher
+# on a Harvest query any more, but a claim still prefers the volume_labels of its
+# own zone, and ALERTS inherits these labels from the aggr_* / node_* series it
+# is written over — the alerts family is matched on them, so an unstamped series
+# silently empties the overlay of every filtered request.
 extraLabels:
   az: local-a
   env: demo

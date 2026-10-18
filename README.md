@@ -104,7 +104,7 @@ kube-state-graph assembles one graph from both. The split is by producer:
 | Store | Query families | Written by | Read path |
 |---|---|---|---|
 | VictoriaMetrics **cluster** | `harvest`, `servicegraph`, `alerts` | netapp-faker (import), OTel Collector (remote-write), vmalert (rule results) | vmselect, unauthenticated |
-| VictoriaMetrics **single** | `ksm`, `kubelet` | vmagent | vmauth, basic auth |
+| VictoriaMetrics **single** | `ksm`, `kubelet`, `appmeta` | vmagent | vmauth, basic auth |
 
 The `probe` family (`up{}`) is served by both, so `/readyz` asks both stores
 rather than calling the estate healthy on the strength of one.
@@ -115,6 +115,35 @@ estate running no alerting engine is that family's normal state. It is served
 here so the overlay has something to overlay — the difference between "nothing
 is firing" and "nobody is evaluating rules" is exactly what a demo has to be
 able to show.
+
+`appmeta` is the other optional family, and it is what turns on the backend's
+**application-metadata metric** (`--app-metadata-metric`): one per-pod row naming
+the pod's Application, its deployer and its namespace's owner. The demo adds no
+producer for it — the metric is `kube_pod_labels`, so it rides the
+kube-state-metrics pipeline that already exists:
+
+- kube-state-metrics allowlists the metric and three pod labels
+  (`pods=[argocd_app,user,owner]`), exported as `label_argocd_app`, `label_user`
+  and `label_owner`; the backend's `appMetadata.labels` binds `app`, `user` and
+  `ns_owner` to those spellings.
+- vmagent stamps the row with the same `az` / `env` / `cluster` as the pod's other
+  series — the one precondition the backend puts on the metric, and the reason it
+  is served from the single-node store rather than the cluster one.
+- Every pod carries its namespace's `owner`; only the four storefront workloads
+  (`loadgen`, `edge-gateway`, `catalog`, `orders`) also carry `argocd_app` and
+  `user`. The metric's Application **wins** over the controller-annotation chain
+  for those pods, so the bare name it carries must equal what the tracking-id
+  yields. `redis`, `mongodb` and `nats` carry no row and keep the controller
+  chain, which is the control case — it is also what keeps `verify.sh` §10's
+  "every drawn pod resolves an application" able to see a dropped allowlist.
+
+The result is two fields that exist nowhere else in the body: `data.namespace_owner`
+on namespace groups and `data.deployed_by` on application groups. **The SPA does
+not render them yet** — they show only in the raw body (`make graph`), and
+`verify.sh` §9 asserts them. Clearing `appMetadata.metric` in
+`charts/ksg-demo/values.yaml` is a complete rollback (no query is issued, every
+body is unchanged); naming it while no backend serves `appmeta` logs one Warn at
+startup and behaves as unset.
 
 This is not decoration. It puts the two halves of the storage join in different
 stores — `kube_persistentvolumeclaim_info` in one, `volume_labels` in the
@@ -131,6 +160,18 @@ The routing table lives in `charts/ksg-demo/values.yaml` under
 30s without a restart. Removing it is a complete rollback to the single-upstream
 deployment: `--prom-url` still points at the cluster store, and the backend
 falls back to one implicit backend serving every family.
+
+Every upstream query also passes a per-store guard that is **on by default**:
+results are cached for 60s, concurrent identical queries are coalesced, at most
+32 are in flight per store, and a graph request's `end` is floored to a 30s grid
+(its `start` shifted equally). Two things follow when you debug here. A repaired
+pipeline can take up to a cache TTL plus one grid step to show up in the graph —
+a body describing "now" may be up to ~90s old. And a build served from the cache
+asks neither store, so a per-build failure count of zero proves nothing about the
+stores; `verify.sh` §8 builds over a window nothing else just read for that
+reason. The demo leaves the defaults alone; `KSG_END_ALIGN=0`,
+`KSG_QUERY_CACHE_MAX_SERIES=0` and `KSG_UPSTREAM_MAX_CONCURRENCY=0` in the
+backend's `extraEnv` restore the raw behaviour.
 
 Credentials are the one thing the routing file never carries. It names the
 environment *variables* (`usernameEnv` / `passwordEnv`); a literal password in
@@ -318,7 +359,7 @@ from inside a subchart's values.
 
 | | URL | Notes |
 |---|---|---|
-| Front door | <http://localhost:3001> | the SPA. Storage: `/graph` and `/sankey`, `/` redirects to `/graph`. Network: `/network/graph` and `/network/sankey`, reachable but with no data source here |
+| Front door | <http://localhost:3001> | the SPA, three standalone pages: `/graph` and `/sankey` (Storage) and `/network/sankey`, which is reachable but has no data source here. `/` redirects to `/graph` |
 | Graph API | <http://localhost:18080/docs> | Scalar UI over the OpenAPI spec |
 | VM cluster store | <http://localhost:18481/select/0/prometheus> | vmselect — Harvest and service-graph series, in raw PromQL |
 | VM single store | <http://localhost:18427> | vmauth — kube-state-metrics and kubelet series. Needs `curl -u ksg:ksg-demo-not-a-real-secret` |
@@ -347,10 +388,12 @@ The front door's runtime configuration is authored in this repository, at
 frontend's own bundled showcase fixture, a convincing graph that proves nothing
 about the pipeline behind it.
 
-The SPA is **pages**, not tabs, grouped by a two-level nav: a category
-(`Storage` | `Network`) and, inside it, a view (`Graph` | `Sankey`). Storage's
-`/graph` and `/sankey` are real URLs, `/` redirects to `/graph`, and each page
-carries its own scope in the query string (`?namespace=shop&prune=false` for the
+The SPA is exactly **three standalone pages** — `/graph`, `/sankey` and
+`/network/sankey` — and the nav bar links to none of them: it holds the
+application name, the time range, the status indicator and the theme control. The
+only in-app move between pages is the Storage Sankey's Locate into `/graph` (and
+Back). Each page is a real URL, `/` redirects to `/graph`, `/network` to
+`/network/sankey`, and each page carries its own scope in the query string (`?namespace=shop&prune=false` for the
 graph, `?az=…&env=…&node=…&mode=write` for the Sankey, plus the shared
 `?from=&to=` window). Neither page requests anything until **Query** is pressed:
 the controls edit a draft, Query commits it to the URL and fetches, and while a
@@ -359,21 +402,23 @@ request is in flight the same button is **Cancel**. The URL is therefore the
 drawn, waiting for one press of Query — which is what makes a bug report about
 this demo actionable.
 
-**The Network category is present but dark here.** `/network/graph` and
-`/network/sankey` trace a switch's traffic from a `GET /v1/trace`-style endpoint
-the SPA reads from `endpoints.trace`. kube-state-graph serves no such route, so
-this demo's `config.json` leaves the key out: neither page fetches anything, both
-say "Trace endpoint is not configured" before and after Query, and the Storage
-pages are unaffected. Naming the key anyway would give Network a Query that
+**The Network Sankey is present but dark here.** `/network/sankey` traces a
+switch's traffic from a `GET /v1/trace`-style endpoint the SPA reads from
+`endpoints.trace`. kube-state-graph serves no such route, so this demo's
+`config.json` leaves the key out: the page fetches nothing, says "Trace endpoint
+is not configured" before and after Query (its scope bar stays operable), and the
+Storage pages are unaffected. Naming the key anyway would give it a Query that
 always 404s; `verify.sh` §10 asserts the
 config and the backend agree, in both directions, so a backend that starts
 serving the route turns the check red instead of leaving a working view unwired.
 
 Two consequences for the wiring here. The nginx history fallback
-(`try_files $uri $uri/ /index.html`) is what makes those URLs survive a full page
-load; without it nginx looks for a file named `sankey`, finds none, and answers
-404 while the in-app switch keeps working — invisible to anyone who only clicks,
-which is why `verify.sh` §10 requests all four paths directly. And a sole `az` /
+(`try_files $uri $uri/ /index.html`) is now the **only** way to reach a page other
+than `/`, since the nav links nowhere: without it nginx looks for a file named
+`sankey`, finds none, and answers 404 for every typed link, refresh and shared
+URL. `verify.sh` §10 therefore requests all three paths directly — and
+deliberately not `/network/graph`, which no longer exists but which the fallback
+would still answer 200 for (the SPA's own not-found page). And a sole `az` /
 `env` is seeded into the Sankey's draft on arrival: this estate has exactly one of
 each, so the only thing left to choose before Query is a root.
 
@@ -424,25 +469,39 @@ netapp-node → netapp-aggr → netapp-svm → pvc → pod → node
 
 Every hop carries the claim I/O summed over everything flowing through it, and
 the totals **conserve tier to tier** — that is what makes the link widths mean
-something, and `verify.sh` asserts it by comparing the top hop's `read_ops`
-against the claim hop's. Two things about this endpoint differ from `/v1/graph`
-and both are visible in the UI:
+something, and `verify.sh` asserts it by comparing the top hop's figures against
+the claim hop's for all four (`read_ops`, `write_ops`, `read_bytes_per_sec`,
+`write_bytes_per_sec`): the `Weight` control (`Throughput` | `IOPS`, a `weight=`
+URL parameter, `Throughput` omitted) and the `Mode` control pick among exactly
+those. Two things about this endpoint differ from `/v1/graph` and both are
+visible in the UI:
 
-- **`az` and `env` are REQUIRED and single-valued.** They pin the zone whose
-  Harvest store answers and narrow the workload side to one estate, so a filer
-  shared across zones is never merged into one diagram. The Sankey's scope bar
-  is therefore its own control, not the graph's filter bar, and it takes its
-  options from the same `kube_pod_info` label values.
-- **At least one root is required, and roots may come from either end.** An
-  ONTAP cluster, controller, aggregate or SVM answers "what is on this filer?";
-  a `namespace/pod` or a Kubernetes node answers "which controller does this pod
-  sit on?" (`node` matches an ONTAP controller and a Kubernetes node name
-  alike). The backend still answers a rootless request with the whole estate,
-  but the page never sends one — Query stays unavailable until a root is added.
-  Only the workload-side kinds can be enumerated: `node` from `kube_pod_info`,
-  `pod` from the selected namespace. ONTAP cluster, aggregate and SVM are typed
-  until a query has drawn them. Adding all three Kubernetes nodes draws the
-  whole estate here, and is the request `verify.sh` §10 makes.
+- **`az` and `env` are REQUIRED.** They pin the zone whose Harvest store is
+  asked and narrow the workload side to one estate, so a filer shared across
+  zones is never merged into one diagram. The backend now accepts several of each
+  (the body is the union of the single-zone bodies) but the Sankey still sends
+  one of each, and `verify.sh` §10 sends a repeated `az` only as backend
+  contract. The Sankey's scope bar is its own control, not the graph's filter
+  bar, and it takes its options from the same `kube_pod_info` label values.
+- **Exactly ONE root kind is required, and roots may come from either end.** No
+  root is `400 missing_root`, two kinds is `400 invalid_scope`, and the page
+  never sends either: adding a root replaces the roots of every other kind, and a
+  link naming two keeps both in the draft with Query off and the reason beside
+  it. An ONTAP cluster (`ontap_cluster`), controller (`ontap_node`), aggregate
+  (`aggr`) or SVM (`svm`) answers "what is on this filer?"; a `namespace/pod` or
+  a Kubernetes `node` answers "which controller does this pod sit on?". **`node`
+  names a Kubernetes node only** — a controller name sent as `node=` is an empty
+  200, which is why the controller kind is its own. Only the workload-side kinds
+  can be enumerated: `node` from `kube_pod_info`, `pod` from the selected
+  namespace. ONTAP cluster, controller, aggregate and SVM are typed until a
+  query has drawn them. Adding all three Kubernetes nodes draws the whole
+  estate here, and is the request `verify.sh` §10 makes; it then roots on each
+  controller in turn and asserts the contract above. The backend also takes
+  `pvc=`, `pv=` and `application=` roots, which the Sankey does not offer yet;
+  §10 exercises `pvc=` and `application=` as backend contract.
+- **An upstream error is a `502`, never a smaller diagram.** The storage build
+  fails on any query error except the alert overlay, and the page shows the
+  backend's message (`upstream query failed: <family>`) in its error state.
 - **`Top pods` (default 10) is a client-side cut.** It keeps the pods with the
   highest flow in the current mode and anything upstream still on a path to
   one; it is never sent to the backend, and it is off while a `pod` root is
@@ -483,7 +542,7 @@ as if the flow continued past the pod. It is now the **Layout** control: `Flat`
 draws pods loose, `Node` wraps each pod in the node it runs on — ordered by name,
 because a node is an inventory item you look up rather than rank by throughput,
 and ordering by flow would move one on every refresh. That choice is
-page-transient: unlike the scope pills beside it, it is not a URL parameter and
+page-transient: unlike the scope pills and `Weight` beside it, it is not a URL parameter and
 does not survive a reload. `pod-node` is therefore still a required tier — losing
 it empties that control rather than putting a gap in the diagram.
 
@@ -545,13 +604,17 @@ and therefore the last thing to appear.
 | Edges have no `p90ServerMs` | the collector's `transform/servicegraph-names` — with metric suffixes off, the histogram loses its `_seconds` and must have it put back |
 | `/readyz` is 503 naming a backend | that store is down or unreachable; the body names the backend, never its URL |
 | Graph or Sankey stays empty after opening a link or a refresh | expected: neither page requests anything until **Query** is pressed — the link has only prefilled the controls |
-| Sankey shows its empty state and Query is unavailable | `endpoints.storageGraph` is absent from `config.json`, or the draft lacks `az`, `env` or a root — all three are required, the first two single-valued; the empty state names which |
+| Sankey shows its empty state and Query is unavailable | `endpoints.storageGraph` is absent from `config.json`, or the draft lacks `az`, `env` or a root — all three are required, and the root is exactly ONE kind (a link naming two keeps both and says so beside Query); the empty state names which |
+| Sankey's error state reads `upstream query failed: <family>` | the storage build fails closed on any upstream query error except the alert overlay, so a Harvest or kubelet outage is a `502`, not a thin diagram. Find the store with `make verify` §8 and `make logs-backend` |
+| A controller name as `node=` draws nothing | expected: `node=` is a Kubernetes node only, so that is an empty 200. A controller is `ontap_node=` |
 | Sankey draws with a gap between two tiers | one leg of the chain is empty; `make verify` §10 names which tier has no edges |
 | Sankey stops at the Pod column — no Application / Namespace | the derived columns found no compound to walk to: kube-state-metrics has lost either the owning controller collector or the `argocd.argoproj.io/tracking-id` entry in `metricAnnotationsAllowList`. `make verify` §10 counts how many drawn pods resolve both |
 | Sankey's `Layout` → `Node` groups nothing | the `pod-node` tier is empty — that is the kubelet leg; `make verify` §10 names it |
 | Sankey's `SVM` → `Group` is disabled | the storage graph's PVCs carry no `labels.aggr` — the backend image predates `expose-claim-aggregate`; `make redeploy-backend`. `make verify` §10 counts the claims that name their aggregate |
-| Network Graph / Sankey say the trace endpoint is not configured | expected: kube-state-graph serves no `/v1/trace`, so `endpoints.trace` is deliberately absent. `make verify` §10 fails if the backend starts serving the route |
-| Network Graph says "Nothing has been requested yet" and its Query does nothing | the front-door image predates frontend `fix/network-graph-unconfigured`, whose Graph view had no unconfigured state — `make redeploy-frontend` |
+| The Network Sankey says the trace endpoint is not configured | expected: kube-state-graph serves no `/v1/trace`, so `endpoints.trace` is deliberately absent. `make verify` §10 fails if the backend starts serving the route |
+| `/network/graph` shows a not-found page | expected: the Network Graph page was removed; the SPA has three pages and `/network` redirects to `/network/sankey`. The front door still answers 200 for the path (the history fallback), so only the page says so |
+| No `data.namespace_owner` / `data.deployed_by` in the graph | the application-metadata metric is off or unrouted: `make verify` §9 names which. Check that `appmeta` is in `kube-state-graph.backends`, that `appMetadata.metric` is set, that kube-state-metrics exports `kube_pod_labels` with `label_argocd_app` / `label_user` / `label_owner` (`curl -u … :18427/api/v1/query?query=kube_pod_labels`), and `make logs-backend` for the startup Warn |
+| A pod shows the wrong Application after the metric was added | the metric's `argocd_app` wins over the controller chain and is used verbatim; it must equal the bare name in the tracking-id (`storefront`, not `storefront:/Deployment:…`) |
 | No node carries `data.alerts` | `kubectl logs deployment/vmalert`; the `alerts` family must also be routed in `kube-state-graph.backends`, and ALERTS must carry `az`/`env` (it inherits them from the expression output) |
 | `data.alerts` is in the API body but the UI shows no alert | fixed in frontend `002b975`; on an older SPA image `parseAlerts` required the panel-era occurrence time and dropped every entry without one. The overlay's alerts carry no time, so the panel shows `n/a` in Count and Last occurred — that is the degraded form, not a missing reading |
 | A controller shows no model or CPU figure | the `node_labels` / `system_node` legs are optional and degrade silently — check `make verify` §6 |

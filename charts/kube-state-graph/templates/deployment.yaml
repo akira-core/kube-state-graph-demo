@@ -34,6 +34,12 @@ spec:
             - --log-level={{ .Values.logLevel }}
             - --az-label={{ .Values.azLabel }}
             - --env-label={{ .Values.envLabel }}
+          {{- with .Values.appMetadata.metric }}
+            - --app-metadata-metric={{ . }}
+          {{- end }}
+          {{- if .Values.appMetadata.labels }}
+            - --app-metadata-labels={{ .Values.appMetadata.labels }}
+          {{- end }}
           {{- if .Values.backends }}
             # With a routing table the file wins over --prom-url and the server
             # says so at WARN. Removing `backends` from values is therefore a
