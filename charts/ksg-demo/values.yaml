@@ -335,13 +335,15 @@ kube-state-metrics:
     - jobs
     - statefulsets
 
-  # All 22 series the graph reads. Nothing else. This estate exercises only the
+  # All 22 series the graph reads, plus kube_pod_labels for the optional
+  # application-metadata metric (`kube-state-graph.appMetadata`). Nothing else. This estate exercises only the
   # Deployment and StatefulSet annotation families — the other four resolve to
   # empty vectors here, which is the backend's designed per-family degradation
   # rather than a fault. They are listed so this file is the reference config
   # rather than the subset one demo happens to need.
   metricAllowlist:
     - kube_pod_info
+    - kube_pod_labels
     - kube_pod_owner
     - kube_pod_container_info
     - kube_pod_spec_volumes_persistentvolumeclaims_info
@@ -375,6 +377,10 @@ kube-state-metrics:
   metricLabelsAllowlist:
     - endpointslices=[kubernetes.io/service-name]
     - nodes=[topology.kubernetes.io/zone,topology.kubernetes.io/region]
+    # The three pod labels the application-metadata metric is read from. NOT
+    # required for the graph: drop this line, the kube_pod_labels allowlist
+    # entry and `kube-state-graph.appMetadata` together and the feature is off.
+    - pods=[argocd_app,user,owner]
 
   # Gives Services, PVCs, and — through the pod's controller — pods their
   # `application`, which is what nests them under an application group. The flag
@@ -574,6 +580,13 @@ kube-state-graph:
   # between "no alerts are firing" and "nobody is evaluating any rules" is
   # exactly what a demo has to be able to show.
   #
+  # `appmeta` is the other OPTIONAL family: the operator-named per-pod metric
+  # `appMetadata.metric` below. It rides on `single-store` because the metric IS
+  # kube_pod_labels, which kube-state-metrics exports and vmagent stamps — the
+  # row therefore carries the same az / env / cluster as its pod's own series,
+  # which is the one precondition the backend puts on the metric. A table that
+  # leaves the family out loads and the feature stays off.
+  #
   # No `zones` on either entry. Zone routing is real, but this demo stamps a
   # single az value across the whole estate, so declaring zones here would be
   # decoration that never selects anything.
@@ -590,7 +603,7 @@ kube-state-graph:
       # vmauth appends the request path to its own url_prefix, so no /prometheus
       # here — see the victoria-metrics-auth block.
       url: http://vm-auth:8427
-      families: [ksm, kubelet, probe]
+      families: [ksm, kubelet, probe, appmeta]
       # NAMES of environment variables, never values. A routing file carrying a
       # literal password is rejected outright, and a variable named here but
       # unset is a load failure rather than a quiet fallback to no credentials.
@@ -608,6 +621,16 @@ kube-state-graph:
         secretKeyRef:
           name: ksg-upstream-auth
           key: password
+
+  # Application metadata from kube_pod_labels, so no producer is added. The
+  # labels are kube-state-metrics' spelling (a `label_` prefix on the sanitised
+  # pod label), and namespace / pod keep the backend's defaults. Pods of the
+  # four storefront workloads carry argocd_app + user, every pod carries its
+  # namespace's owner (charts/demo-workloads/values.yaml). Clearing `metric`
+  # is a complete rollback: no query is issued and every body is unchanged.
+  appMetadata:
+    metric: kube_pod_labels
+    labels: app=label_argocd_app,user=label_user,ns_owner=label_owner
 
   azLabel: az
   envLabel: env

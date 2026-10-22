@@ -40,11 +40,25 @@ defaults:
   errorRate: 0
   port: 8080
 
+# Feeds the backend's optional application-metadata metric (kube_pod_labels
+# here — see `kube-state-graph.appMetadata` in the umbrella values), which is
+# the only source of `data.namespace_owner` on a namespace group and
+# `data.deployed_by` on an application group.
+appMetadata:
+  # namespace -> owner; stamped as the `owner` pod label on every pod in it.
+  owners:
+    shop: team-commerce
+    platform: team-platform
+
 workloads:
   # --- shop / storefront -----------------------------------------------------
   - name: loadgen
     namespace: shop
     application: storefront
+    # `deployedBy` opts a workload's pods into the metric's Application. Left
+    # off redis, mongodb and nats on purpose: their Application still comes
+    # from the controller's tracking-id, so both resolution paths stay live.
+    deployedBy: argo-sync
     kind: Deployment
     replicas: 1
     # No inbound listener: this is the traffic source that makes every other
@@ -57,6 +71,7 @@ workloads:
   - name: edge-gateway
     namespace: shop
     application: storefront
+    deployedBy: argo-sync
     kind: Deployment
     replicas: 2
     service: true
@@ -69,6 +84,7 @@ workloads:
   - name: catalog
     namespace: shop
     application: catalog
+    deployedBy: argo-sync
     kind: Deployment
     replicas: 2
     service: true
@@ -102,6 +118,8 @@ workloads:
   - name: orders
     namespace: shop
     application: orders
+    # A different deployer, so deployed_by is visibly per Application.
+    deployedBy: release-bot
     kind: Deployment
     replicas: 2
     service: true

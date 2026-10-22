@@ -25,11 +25,15 @@ a values reordering does not churn the pod spec and trigger a needless rollout.
 `global.ksgExternalLabels.az` / `.env` seed the map when the umbrella release
 supplies them, because the faker is the THIRD component stamping those two
 labels — vmagent stamps what it scrapes and the collector stamps the
-service-graph series — and kube-state-graph pushes ?az= / ?env= to upstream
-PromQL as raw matchers against every family, this one included. A value that
-disagreed with the other two would silently drop the whole NetApp estate out of
-any filtered request. `extraLabels` still wins per key, and a standalone install
-with no `global` gets exactly what it declares.
+service-graph series. kube-state-graph no longer renders az / env matchers on
+Harvest queries (`?az=` only picks the harvest backend), so a series without them
+is no longer invisible. They are stamped anyway, for the two readers left: a
+claim PREFERS the `volume_labels` series of its own zone, and vmalert writes
+ALERTS over these series, so the alerts inherit az / env from them — and the
+`alerts` family IS matched on az / env, so an unstamped series silently empties
+the overlay of every filtered request. A value that disagreed with the other two
+would split the estate into two zones. `extraLabels` still wins per key, and a
+standalone install with no `global` gets exactly what it declares.
 
 `cluster` is deliberately NOT seeded: Harvest series carry no cluster label, and
 inventing one would put the storage estate in a cluster bucket of its own.

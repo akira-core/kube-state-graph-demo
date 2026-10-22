@@ -295,22 +295,51 @@ else
     fi
   done
 
+  # Every upstream query is cached for 60s and `end` is floored to a 30s grid,
+  # so a build over the window the previous section just read is answered from
+  # memory and touches neither store: its failure delta is 0 whatever the
+  # stores are doing. Build one grid step further back than anything else in
+  # this script, at a random one of six, so the stores are actually asked —
+  # and say so when they still were not.
+  cache_misses() { awk '$1 ~ /^kube_state_graph_query_cache_misses_total/ { s += $2 } END { printf "%d", s }' <<<"$1"; }
+
   if [[ "${missing}" == "0" ]]; then
+    b_end=$(( $(date +%s) - 30 * (2 + RANDOM % 6) ))
     curl -sS --max-time 30 -o /dev/null \
-      "${BACKEND}/v1/graph?start=$(( $(date +%s) - 300 ))&end=$(date +%s)&prune=false" 2>/dev/null || true
+      "${BACKEND}/v1/graph?start=$(( b_end - 300 ))&end=${b_end}&prune=false" 2>/dev/null || true
     after=$(curl -sS --max-time 20 "${BACKEND}/metrics" 2>/dev/null || true)
+    miss_delta=$(( $(cache_misses "${after}") - $(cache_misses "${metrics}") ))
     for backend in cluster-store single-store; do
       before_n=$(backend_failures "${backend}" "${metrics}")
       after_n=$(backend_failures "${backend}" "${after}")
       delta=$(awk -v a="${after_n:-0}" -v b="${before_n:-0}" 'BEGIN { printf "%d", a - b }')
       if [[ "${delta}" == "0" ]]; then
-        check "backend ${backend} failures during one build" yes "0 new (${before_n%.*} lifetime)"
+        if (( miss_delta > 0 )); then
+          check "backend ${backend} failures during one build" yes \
+            "0 new over ${miss_delta} uncached queries (${before_n%.*} lifetime)"
+        else
+          check "backend ${backend} failures during one build" yes \
+            "0 new, but the build was served from the query cache — stores not exercised"
+        fi
       else
         check "backend ${backend} failures during one build" no \
           "${delta} new failures — that store is not answering"
       fi
     done
   fi
+
+  # The three default-on load controls, as the backend's own series. A missing
+  # family means the image predates them (or someone passed the opt-out flags):
+  # builds then hit both stores raw, which is fine for a demo but is no longer
+  # the configuration the backend ships with.
+  for fam in kube_state_graph_query_cache_hits_total kube_state_graph_query_cache_misses_total kube_state_graph_upstream_inflight; do
+    if grep -q "^${fam}" <<<"${metrics}"; then
+      check "upstream guard series ${fam#kube_state_graph_}" yes "present"
+    else
+      check "upstream guard series ${fam#kube_state_graph_}" no \
+        "absent — the backend image predates the per-store limit and query cache, or they were switched off"
+    fi
+  done
 
   reload_err=$(awk '/^kube_state_graph_backend_config_reload_total\{result="error"\}/ { print $2 }' <<<"${metrics}" | tail -1)
   if [[ -z "${reload_err}" || "${reload_err%.*}" == "0" ]]; then
@@ -434,6 +463,32 @@ else
   check "netapp-node carries data.perf" "$( [[ "${perf}" != "0" ]] && echo yes || echo no )" \
     "${perf} controllers report cpu_busy_pct (system_node)"
 
+  # The application-metadata metric (kube_pod_labels), asserted on the body: its
+  # two group fields exist NOWHERE else, so their presence is the proof the
+  # appmeta family is routed, the metric is named, and the pod labels reached
+  # the single-node store. Absent, the graph draws exactly as before — nothing
+  # errors — which is why this is asserted and not inferred.
+  ns_owner=$(jq -r '[.elements.nodes[] | select(.data.type == "namespace" and .data.namespace_owner != null) | "\(.data.id | split("/") | last)=\(.data.namespace_owner)"] | sort | join(" ")' <<<"${graph}")
+  if [[ "${ns_owner}" == *"shop=team-commerce"* && "${ns_owner}" == *"platform=team-platform"* ]]; then
+    check "namespace groups carry data.namespace_owner" yes "${ns_owner}"
+  else
+    check "namespace groups carry data.namespace_owner" no \
+      "${ns_owner:-none} — the appmeta family is unrouted, KSG_APP_METADATA_METRIC is unset, or the owner pod label is missing"
+  fi
+  deployed=$(jq -r '[.elements.nodes[] | select(.data.type == "application" and .data.deployed_by != null) | "\(.data.id | split("/") | last)=\(.data.deployed_by)"] | sort | join(" ")' <<<"${graph}")
+  if [[ "${deployed}" == *"orders=release-bot"* && "${deployed}" == *"storefront=argo-sync"* ]]; then
+    check "application groups carry data.deployed_by" yes "${deployed}"
+  else
+    check "application groups carry data.deployed_by" no \
+      "${deployed:-none} — the argocd_app / user pod labels are missing, or kube_pod_labels is not allowlisted"
+  fi
+  # The control case: an Application the metric says nothing about still comes
+  # from the controller's tracking-id, so both resolution paths stay live.
+  # data-plane (mongodb) carries no argocd_app label on purpose.
+  chain_only=$(jq -r '[.elements.nodes[] | select(.data.type == "application" and (.data.id | endswith("/application/data-plane")) and .data.deployed_by == null)] | length' <<<"${graph}")
+  check "an Application the metric omits keeps the controller chain" "$( [[ "${chain_only}" == "1" ]] && echo yes || echo no )" \
+    "data-plane resolves with no deployed_by — the controller-annotation path still works beside the metric"
+
   # The overlay's whole job: an alert firing upstream has to arrive ATTACHED to
   # the node its labels name, not merely exist in the store.
   alerted=$(jq '[.elements.nodes[] | select((.data.alerts // []) | length > 0)] | length' <<<"${graph}")
@@ -500,18 +555,20 @@ fi
 code=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "${FRONTEND}/healthz" 2>/dev/null || echo 000)
 check "front door answers /healthz" "$( [[ "${code}" == 200 ]] && echo yes || echo no )" "HTTP ${code}"
 
-# The SPA is PAGES, not tabs: /graph and /sankey (the Storage category) and
-# /network/graph and /network/sankey (the Network category) are real URLs the
-# router owns, and each carries its own scope in the query string. Only the
-# nginx history fallback (`try_files $uri $uri/ /index.html`) makes them
-# reachable by a full page load — a typed link, a refresh, a shared URL. Without
-# it nginx looks for a file called `sankey`, finds none, and answers 404: the
-# in-app nav still works, so the break is invisible to anyone who only ever
-# clicks. The Network pair is asserted too: it is one path segment deeper, and
-# it stays reachable even though this demo gives it no data source. Assert the
-# document, not merely the status, because a 200 carrying the wrong body would
-# pass a status-only check.
-for route in graph sankey network/graph network/sankey; do
+# The SPA is exactly THREE standalone pages: /graph, /sankey (Storage) and
+# /network/sankey. Each is a real URL the router owns and carries its own scope
+# in the query string, and the nav bar links to none of them — the only in-app
+# move between pages is the Storage Sankey's Locate into /graph. So the nginx
+# history fallback (`try_files $uri $uri/ /index.html`) is not a convenience
+# any more: it is the ONLY way to reach a page, by a typed link, a refresh or a
+# shared URL. Without it nginx looks for a file called `sankey`, finds none, and
+# answers 404. /network/sankey is one path segment deeper and stays reachable
+# even though this demo gives it no data source. `/network/graph` is NOT
+# asserted: the page is gone and the fallback would answer 200 for it anyway
+# (the SPA's own not-found page), so a curl cannot tell it from a live route.
+# Assert the document, not merely the status, because a 200 carrying the wrong
+# body would pass a status-only check.
+for route in graph sankey network/sankey; do
   body=$(curl -sS --max-time 20 -w '\n%{http_code}' "${FRONTEND}/${route}" 2>/dev/null || echo $'\n000')
   code=${body##*$'\n'}
   if [[ "${code}" == 200 ]] && grep -qi '<div id="root"' <<<"${body}"; then
@@ -563,9 +620,10 @@ fi
 
 # The Sankey's own endpoint, and the second thing the front door proxies to the
 # backend. It is asserted separately from the graph because it can fail on its
-# own in two ways the graph never would: it is the only endpoint requiring a
-# SINGLE ?az= and ?env= (both absent or repeated is a 400, not a wider answer),
-# and its body is a storage-flow DAG whose tiers each have to be present for the
+# own in two ways the graph never would: it is the only endpoint requiring ?az=,
+# ?env= AND exactly one root kind (absent az/env is a 400 missing_az/missing_env,
+# no root a 400 missing_root, two kinds a 400 invalid_scope — never a wider
+# answer), and its body is a storage-flow DAG whose tiers each have to be present for the
 # diagram to draw. A response that is 200 but missing a tier renders as a Sankey
 # with a gap, which looks like an estate fact rather than a broken pipeline.
 lv_base=$(jq -r '.endpoints.labelValues // empty' /tmp/ksg-verify-config.json 2>/dev/null || true)
@@ -625,22 +683,30 @@ else
   # The flow weights are what give a Sankey link its width, and they must
   # conserve tier to tier. Comparing the top hop against the claim hop is the
   # cheapest end-to-end statement of that: they are summed over different edge
-  # sets and can only agree if every claim's I/O rode the whole chain.
-  top=$(jq '[.elements.edges[]? | select(.data.labels.tier == "node-aggr") | .data.metrics.read_ops // 0] | add // 0' /tmp/ksg-verify-storage.json)
-  leaf=$(jq '[.elements.edges[]? | select(.data.labels.tier == "svm-pvc") | .data.metrics.read_ops // 0] | add // 0' /tmp/ksg-verify-storage.json)
+  # sets and can only agree if every claim's I/O rode the whole chain. The
+  # Sankey's Weight control (Throughput | IOPS) and its Mode control (read |
+  # write | both) pick among FOUR figures, so all four are asserted: a backend
+  # that conserved read_ops and dropped write_bytes_per_sec would draw a
+  # correct IOPS Sankey and a broken Throughput one.
+  #
   # Not an equality: the figures are summed over different edge sets and each
   # is rounded to 6 significant digits, so they agree to within rounding rather
   # than bit for bit. 0.1% is far tighter than a dropped claim (33% here) and
   # far looser than that rounding.
-  conserved=$(jq -n --argjson a "${top}" --argjson b "${leaf}" \
-    '$a > 0 and (($a - $b) | fabs) < ($a * 0.001)')
-  summary=$(jq -rn --argjson a "${top}" --argjson b "${leaf}" \
-    '"node-aggr \($a | .*100 | round / 100) vs svm-pvc \($b | .*100 | round / 100) read_ops"')
-  if [[ "${conserved}" == "true" ]]; then
-    check "flow weights conserve tier to tier" yes "${summary}"
+  unconserved=""
+  summary=""
+  for m in read_ops write_ops read_bytes_per_sec write_bytes_per_sec; do
+    top=$(jq --arg m "${m}" '[.elements.edges[]? | select(.data.labels.tier == "node-aggr") | .data.metrics[$m] // 0] | add // 0' /tmp/ksg-verify-storage.json)
+    leaf=$(jq --arg m "${m}" '[.elements.edges[]? | select(.data.labels.tier == "svm-pvc") | .data.metrics[$m] // 0] | add // 0' /tmp/ksg-verify-storage.json)
+    conserved=$(jq -n --argjson a "${top}" --argjson b "${leaf}" '$a > 0 and (($a - $b) | fabs) < ($a * 0.001)')
+    [[ "${conserved}" == "true" ]] || unconserved="${unconserved} ${m}"
+    summary="${summary}${summary:+, }${m}=$(jq -rn --argjson a "${top}" '$a | .*100 | round / 100')"
+  done
+  if [[ -z "${unconserved}" ]]; then
+    check "flow weights conserve tier to tier" yes "node-aggr = svm-pvc for ${summary}"
   else
     check "flow weights conserve tier to tier" no \
-      "${summary} — the summation does not carry through"
+      "node-aggr and svm-pvc disagree on:${unconserved} — the summation does not carry through"
   fi
 
   # The Sankey's two rightmost columns are DERIVED, not backend tiers. The
@@ -696,13 +762,95 @@ else
     check "every claim names its aggregate (labels.aggr)" no \
       "${named} of ${claims} claims name an aggregate in the body, across ${spanned} — the Sankey's SVM Group presents disabled; a backend image older than expose-claim-aggregate?"
   fi
+
+  # Each drawn claim carries its QoS policy group and ceilings on the PVC node.
+  # qos_policy_fixed_max_throughput_* is §6's "policy ceiling"; this is the same
+  # series arriving on the body, and it is what the tooltip's utilisation reads.
+  qos_claims=$(jq -r '
+    ([.elements.edges[]? | select(.data.labels.tier == "svm-pvc") | .data.target] | unique) as $pvcs
+    | ([.elements.nodes[]? | {key: .data.id, value: .data}] | from_entries) as $n
+    | "\([ $pvcs[] | select($n[.].qos.policy_group != null) ] | length) \($pvcs | length)"
+  ' /tmp/ksg-verify-storage.json 2>/dev/null || echo "0 0")
+  if [[ "${qos_claims%% *}" == "${qos_claims##* }" && "${qos_claims##* }" != "0" ]]; then
+    check "every drawn claim carries data.qos" yes "${qos_claims%% *}/${qos_claims##* } claims name a policy group"
+  else
+    check "every drawn claim carries data.qos" no \
+      "${qos_claims%% *} of ${qos_claims##* } claims carry a QoS policy group — the qos_* second wave or the policy series is missing"
+  fi
+
+  # The ROOT contract, through the front door like the page's own request. The
+  # backend takes EXACTLY ONE root kind: none is 400 missing_root, two is 400
+  # invalid_scope, and `node=` names a Kubernetes node only — a controller name
+  # sent as `node=` is an EMPTY 200, the silent failure, because the SPA's old
+  # Node root offered controllers. A controller is `ontap_node=`.
+  storage_get() { # <extra query string> -> "<http code>|<body>"
+    local r; r=$(curl -sS --max-time 30 -w '\n%{http_code}' \
+      "${FRONTEND}${storage_path}?start=$(( now - 900 ))&end=${now}&az=${KSG_AZ}&env=${KSG_ENV}$1" 2>/dev/null || printf '\n000')
+    printf '%s|%s' "${r##*$'\n'}" "${r%$'\n'*}"
+  }
+  reason_of() { jq -r '.error.reason // .reason // empty' <<<"${1#*|}" 2>/dev/null; }
+
+  r=$(storage_get "")
+  if [[ "${r%%|*}" == 400 && "$(reason_of "${r}")" == missing_root ]]; then
+    check "a rootless storage request is refused (missing_root)" yes "HTTP 400, reason missing_root"
+  else
+    check "a rootless storage request is refused (missing_root)" no \
+      "HTTP ${r%%|*}, reason $(reason_of "${r}") — a backend that answers the whole estate would hide a front door that stopped sending a root"
+  fi
+  r=$(storage_get "&node=${KSG_CLUSTER_RAW}-worker&ontap_node=ontap-lab-01")
+  check "two root kinds are refused (invalid_scope)" "$( [[ "${r%%|*}" == 400 && "$(reason_of "${r}")" == invalid_scope ]] && echo yes || echo no )" \
+    "HTTP ${r%%|*}, reason $(reason_of "${r}")"
+
+  controllers=$(jq -r '[.elements.nodes[]? | select(.data.type == "netapp-node") | .data.name] | sort | .[]' /tmp/ksg-verify-storage.json 2>/dev/null || true)
+  if [[ -z "${controllers}" ]]; then
+    check "ontap_node roots draw each controller's flow" no "the rooted body names no netapp-node to root on"
+  else
+    bad=""
+    for c in ${controllers}; do
+      r=$(storage_get "&ontap_node=$(jq -rn --arg c "${c}" '$c|@uri')")
+      n=$(jq --arg c "${c}" '[.elements.nodes[]? | select(.data.type == "netapp-node" and .data.name == $c)] | length' <<<"${r#*|}" 2>/dev/null || echo 0)
+      t=$(jq '[.elements.edges[]? | select(.data.labels.tier != null)] | length' <<<"${r#*|}" 2>/dev/null || echo 0)
+      [[ "${r%%|*}" == 200 && "${n}" == 1 && "${t}" -gt 0 ]] || bad="${bad} ${c}(HTTP ${r%%|*}, ${t} edges)"
+    done
+    check "ontap_node roots draw each controller's flow" "$( [[ -z "${bad}" ]] && echo yes || echo no )" \
+      "${bad:-$(wc -w <<<"${controllers}" | tr -d ' ') controllers: $(tr '\n' ' ' <<<"${controllers}")}"
+
+    first=$(head -1 <<<"${controllers}")
+    r=$(storage_get "&node=$(jq -rn --arg c "${first}" '$c|@uri')")
+    empty=$(jq '(.elements.nodes // []) | length' <<<"${r#*|}" 2>/dev/null || echo "?")
+    check "node= is a Kubernetes node only (a controller name draws nothing)" "$( [[ "${r%%|*}" == 200 && "${empty}" == 0 ]] && echo yes || echo no )" \
+      "node=${first} -> HTTP ${r%%|*}, ${empty} nodes"
+  fi
+
+  # BACKEND contract only: the SPA does not send these yet (its Sankey offers
+  # node / pod / ontap_cluster / ontap_node / aggr / svm), but the estate has to
+  # answer them so the day it does, the first thing it meets is not a gap.
+  # A claim root is the one reaching a claim directly, with no FlexVol-name
+  # derivation, and an application root is the reverse walk from a tracking-id.
+  claim=$(jq -r '[.elements.nodes[]? | select(.data.type == "pvc" and (.data.id | contains("/shop/data-mongodb-0")))] | .[0].data.id // empty | split("/") | "\(.[1])/\(.[2])"' /tmp/ksg-verify-storage.json 2>/dev/null || true)
+  if [[ -z "${claim}" ]]; then
+    check "pvc= root draws its claim's storage chain (backend)" no "no shop/data-mongodb-0 claim in the rooted body"
+  else
+    r=$(storage_get "&pvc=$(jq -rn --arg c "${claim}" '$c|@uri')")
+    t=$(jq '[.elements.edges[]? | select(.data.labels.tier != null)] | length' <<<"${r#*|}" 2>/dev/null || echo 0)
+    check "pvc= root draws its claim's storage chain (backend)" "$( [[ "${r%%|*}" == 200 && "${t}" -gt 0 ]] && echo yes || echo no )" \
+      "pvc=${claim} -> HTTP ${r%%|*}, ${t} storage-flow edges"
+  fi
+  r=$(storage_get "&application=data-plane")
+  t=$(jq '[.elements.edges[]? | select(.data.labels.tier == "pvc-pod")] | length' <<<"${r#*|}" 2>/dev/null || echo 0)
+  check "application= root draws its pods' claims (backend)" "$( [[ "${r%%|*}" == 200 && "${t}" -gt 0 ]] && echo yes || echo no )" \
+    "application=data-plane -> HTTP ${r%%|*}, ${t} pvc-pod edges"
+  r=$(storage_get "&az=${KSG_AZ}-unused&ontap_node=ontap-lab-01")
+  t=$(jq '[.elements.edges[]? | select(.data.labels.tier != null)] | length' <<<"${r#*|}" 2>/dev/null || echo 0)
+  check "az repeats; a zone the estate lacks adds nothing (backend)" "$( [[ "${r%%|*}" == 200 && "${t}" -gt 0 ]] && echo yes || echo no )" \
+    "az=${KSG_AZ}&az=${KSG_AZ}-unused -> HTTP ${r%%|*}, ${t} storage-flow edges"
 fi
 
-# The Network category is the SPA's third data source, and the backend does not
+# The Network Sankey is the SPA's third data source, and the backend does not
 # serve it: there is no /v1/trace, so this demo leaves `endpoints.trace` out and
-# /network/* fetches nothing and says the endpoint is not configured. Both
+# /network/sankey fetches nothing and says the endpoint is not configured. Both
 # directions of drift are asserted. A config naming the endpoint while the backend 404s it
-# gives the Network page a Query that always errors; a backend that starts
+# gives the Network Sankey a Query that always errors; a backend that starts
 # serving it while the config stays silent leaves a working view dark. This
 # request sends no hostname, so a real route may well refuse it: any status but
 # 404 counts as the route existing.
@@ -711,7 +859,7 @@ trace_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
   "${FRONTEND}${trace_path:-/api/v1/trace}" 2>/dev/null || echo 000)
 if [[ -z "${trace_path}" && "${trace_code}" == 404 ]]; then
   check "Network trace endpoint matches the backend" yes \
-    "endpoints.trace absent and /api/v1/trace 404s — /network/* is dark by design"
+    "endpoints.trace absent and /api/v1/trace 404s — /network/sankey is dark by design"
 elif [[ -n "${trace_path}" && "${trace_code}" != 404 && "${trace_code}" != 000 ]]; then
   check "Network trace endpoint matches the backend" yes "${trace_path} answers HTTP ${trace_code}"
 elif [[ -z "${trace_path}" ]]; then
@@ -719,7 +867,7 @@ elif [[ -z "${trace_path}" ]]; then
     "endpoints.trace absent but /api/v1/trace answers HTTP ${trace_code} — the backend now serves it; wire it in the front door's config"
 else
   check "Network trace endpoint matches the backend" no \
-    "endpoints.trace=${trace_path} answers HTTP ${trace_code} — every Network Query would error"
+    "endpoints.trace=${trace_path} answers HTTP ${trace_code} — the Network Sankey's Query would always error"
 fi
 
 # The withdrawn edge-type catalogue is asserted GONE, not present. `/v1/edge-types`
